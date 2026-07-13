@@ -14,15 +14,27 @@ initSync({ module: wasm });
 
 const lessons = JSON.parse(lessons_json());
 assert.deepEqual(
-  lessons.map((lesson) => lesson.id),
+  lessons.slice(0, 4).map((lesson) => lesson.id),
   ["first", "firstfixed", "firstadd", "firstsub"]
 );
+assert.equal(lessons.length, 15);
 
 const expectedStatus = new Map([
   ["first", { kind: "faulted", code: "fell_off_text" }],
   ["firstfixed", { kind: "exited", shell_status: 255 }],
   ["firstadd", { kind: "exited", shell_status: 30 }],
-  ["firstsub", { kind: "exited", shell_status: 10 }]
+  ["firstsub", { kind: "exited", shell_status: 10 }],
+  ["addglobal", { kind: "exited", shell_status: 210 }],
+  ["addglobalbetter", { kind: "exited", shell_status: 210 }],
+  ["addgloballea", { kind: "exited", shell_status: 210 }],
+  ["addarray1", { kind: "exited", shell_status: 210 }],
+  ["addarray2", { kind: "exited", shell_status: 210 }],
+  ["addarray3", { kind: "exited", shell_status: 54 }],
+  ["addarray4", { kind: "exited", shell_status: 160 }],
+  ["cmp1", { kind: "exited", shell_status: 255 }],
+  ["sumloop", { kind: "exited", shell_status: 55 }],
+  ["sumloopb", { kind: "exited", shell_status: 55 }],
+  ["hello", { kind: "exited", shell_status: 0 }]
 ]);
 
 for (const lesson of lessons) {
@@ -30,7 +42,7 @@ for (const lesson of lessons) {
     JSON.stringify([{ name: lesson.module_name, source: lesson.source }])
   );
   const initial = JSON.parse(session.view_json());
-  assert.equal(initial.protocol_version, 1);
+  assert.equal(initial.protocol_version, 2);
   assert.equal(initial.status.kind, "paused");
 
   const result = JSON.parse(
@@ -47,6 +59,17 @@ for (const lesson of lessons) {
   assert.equal(typeof result.view.registers[0].unsigned, "string");
   session.free();
 }
+
+const hello = lessons.find((lesson) => lesson.id === "hello");
+const output = new WasmSession(
+  JSON.stringify([{ name: hello.module_name, source: hello.source }])
+);
+const helloResult = JSON.parse(
+  output.execute(JSON.stringify({ Continue: { max_steps: 100 } }))
+);
+assert.equal(helloResult.view.io.stdout_escaped, "Hello world!\\n\\0");
+assert.deepEqual(helloResult.view.io.stdout_bytes.slice(-2), [10, 0]);
+output.free();
 
 const add = lessons.find((lesson) => lesson.id === "firstadd");
 const reversible = new WasmSession(
@@ -78,4 +101,4 @@ try {
 assert.equal(buildError.diagnostics[0].code, "E212");
 assert.match(buildError.diagnostics[0].help, /\$60/);
 
-console.log("WASM protocol smoke test passed for all four Lecture 3 lessons.");
+console.log("WASM protocol smoke test passed for all 15 Lecture 3–4 lessons.");

@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
-use crate::program::{Instruction, Program, SourceLocation};
-use crate::protocol::{FlagsView, StepEvent, hex64};
+use crate::program::{DATA_BASE, Instruction, Program, SourceLocation};
+use crate::protocol::{FlagsView, StepEvent, escaped_bytes, hex64};
 
 const STACK_START: u64 = 0x0000_7fff_ffff_e000;
 
@@ -237,24 +239,72 @@ impl RegisterRef {
 pub(crate) enum Operand {
     Immediate(u64),
     Register(RegisterRef),
+    Memory(MemoryAddress),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MemoryAddress {
+    pub(crate) text: String,
+    pub(crate) symbol: Option<String>,
+    pub(crate) symbol_address: Option<u64>,
+    pub(crate) displacement: i64,
+    pub(crate) base: Option<RegisterRef>,
+    pub(crate) index: Option<RegisterRef>,
+    pub(crate) scale: u8,
+    pub(crate) rip_relative: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JumpCondition {
+    Always,
+    Equal,
+    NotEqual,
+    Less,
+    LessOrEqual,
+    Greater,
+    GreaterOrEqual,
+    Below,
+    BelowOrEqual,
+    Above,
+    AboveOrEqual,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Operation {
     Mov {
         source: Operand,
-        destination: RegisterRef,
+        destination: Operand,
         width: u8,
     },
     Add {
         source: Operand,
-        destination: RegisterRef,
+        destination: Operand,
         width: u8,
     },
     Sub {
         source: Operand,
+        destination: Operand,
+        width: u8,
+    },
+    Lea {
+        source: MemoryAddress,
         destination: RegisterRef,
         width: u8,
+    },
+    Cmp {
+        source: Operand,
+        destination: Operand,
+        width: u8,
+    },
+    Xor {
+        source: Operand,
+        destination: Operand,
+        width: u8,
+    },
+    Jump {
+        condition: JumpCondition,
+        target: usize,
+        target_label: String,
     },
     Syscall,
 }
@@ -305,15 +355,23 @@ pub(crate) struct Machine {
     pub(crate) flags: Flags,
     pub(crate) pc: usize,
     pub(crate) status: MachineStatus,
+    pub(crate) memory: Vec<u8>,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    data_symbols: BTreeMap<String, u64>,
 }
 
 impl Machine {
-    pub(crate) fn new(entry: usize) -> Self {
+    pub(crate) fn new(program: &Program) -> Self {
         Self {
             registers: RegisterFile::default(),
             flags: Flags::default(),
-            pc: entry,
+            pc: program.entry(),
             status: MachineStatus::Paused,
+            memory: program.initial_data().to_vec(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            data_symbols: program.data_symbols.clone(),
         }
     }
 
@@ -325,14 +383,35 @@ impl Machine {
         let before_pc = self.pc;
         let before_status = self.status.clone();
         let before_flags = self.flags;
-        let mut writes = Vec::new();
+        let stdout_len_before = self.stdout.len();
+        let stderr_len_before = self.stderr.len();
+        let mut register_writes = Vec::new();
+        let mut memory_writes = Vec::new();
         let mut events = vec![StepEvent::Instruction {
             location: instruction.location.clone(),
             text: instruction.text.clone(),
         }];
 
         self.pc += 1;
-        let explanation = self.apply_instruction(&instruction, &mut writes, &mut events);
+        let explanation = match self.apply_instruction(
+            &instruction,
+            &mut register_writes,
+            &mut memory_writes,
+            &mut events,
+        ) {
+            Ok(explanation) => explanation,
+            Err(fault) => {
+                self.status = MachineStatus::Faulted {
+                    code: fault.code.to_string(),
+                    message: fault.message.clone(),
+                };
+                events.push(StepEvent::Fault {
+                    code: fault.code.to_string(),
+                    message: fault.message.clone(),
+                });
+                fault.message
+            }
+        };
 
         if self.status.can_step() && self.pc >= program.instructions.len() {
             let message =
@@ -355,7 +434,10 @@ impl Machine {
             status_after: self.status.clone(),
             flags_before: before_flags,
             flags_after: self.flags,
-            register_writes: writes,
+            register_writes,
+            memory_writes,
+            stdout_len_before,
+            stderr_len_before,
         };
         ExecutedStep {
             delta,
@@ -367,22 +449,30 @@ impl Machine {
     fn apply_instruction(
         &mut self,
         instruction: &Instruction,
-        writes: &mut Vec<RegisterWriteDelta>,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        memory_writes: &mut Vec<MemoryWriteDelta>,
         events: &mut Vec<StepEvent>,
-    ) -> String {
+    ) -> Result<String, RuntimeFault> {
         match &instruction.operation {
             Operation::Mov {
                 source,
                 destination,
                 width,
             } => {
-                let value = self.read_operand(source, *width, events);
-                self.write_register(*destination, value, writes, events);
-                format!(
-                    "Moved {} into %{}. mov does not change the flags.",
+                let value = self.read_operand(source, *width, events)?;
+                self.write_operand(
+                    destination,
+                    value,
+                    *width,
+                    register_writes,
+                    memory_writes,
+                    events,
+                )?;
+                Ok(format!(
+                    "Moved {} into {}. mov does not change the flags.",
                     format_width(value, *width),
-                    destination.name()
-                )
+                    operand_name(destination)
+                ))
             }
             Operation::Add {
                 source,
@@ -391,9 +481,10 @@ impl Machine {
             } => self.apply_arithmetic(
                 ArithmeticKind::Add,
                 source,
-                *destination,
+                destination,
                 *width,
-                writes,
+                register_writes,
+                memory_writes,
                 events,
             ),
             Operation::Sub {
@@ -403,18 +494,60 @@ impl Machine {
             } => self.apply_arithmetic(
                 ArithmeticKind::Sub,
                 source,
-                *destination,
+                destination,
                 *width,
-                writes,
+                register_writes,
+                memory_writes,
                 events,
             ),
-            Operation::Syscall => self.apply_syscall(events),
+            Operation::Lea {
+                source,
+                destination,
+                width,
+            } => {
+                let address = self.effective_address(source, events)?;
+                self.write_register(*destination, address, register_writes, events);
+                Ok(format!(
+                    "lea computed {} = {} without reading memory, then wrote the address to %{}.",
+                    source.text,
+                    format_width(address, *width),
+                    destination.name()
+                ))
+            }
+            Operation::Cmp {
+                source,
+                destination,
+                width,
+            } => self.apply_compare(source, destination, *width, events),
+            Operation::Xor {
+                source,
+                destination,
+                width,
+            } => self.apply_xor(
+                source,
+                destination,
+                *width,
+                register_writes,
+                memory_writes,
+                events,
+            ),
+            Operation::Jump {
+                condition,
+                target,
+                target_label,
+            } => Ok(self.apply_jump(*condition, *target, target_label, events)),
+            Operation::Syscall => self.apply_syscall(register_writes, events),
         }
     }
 
-    fn read_operand(&self, operand: &Operand, width: u8, events: &mut Vec<StepEvent>) -> u64 {
+    fn read_operand(
+        &self,
+        operand: &Operand,
+        width: u8,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<u64, RuntimeFault> {
         match operand {
-            Operand::Immediate(value) => *value & width_mask(width),
+            Operand::Immediate(value) => Ok(*value & width_mask(width)),
             Operand::Register(register) => {
                 let value = self.registers.read(*register);
                 events.push(StepEvent::RegisterRead {
@@ -422,8 +555,31 @@ impl Machine {
                     value: format_width(value, width),
                     width,
                 });
-                value
+                Ok(value)
             }
+            Operand::Memory(address) => self.read_memory(address, width, events),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_operand(
+        &mut self,
+        operand: &Operand,
+        value: u64,
+        width: u8,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        memory_writes: &mut Vec<MemoryWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<(), RuntimeFault> {
+        match operand {
+            Operand::Register(register) => {
+                self.write_register(*register, value, register_writes, events);
+                Ok(())
+            }
+            Operand::Memory(address) => {
+                self.write_memory(address, value, width, memory_writes, events)
+            }
+            Operand::Immediate(_) => unreachable!("parser rejects immediate destinations"),
         }
     }
 
@@ -454,22 +610,25 @@ impl Machine {
         &mut self,
         kind: ArithmeticKind,
         source: &Operand,
-        destination: RegisterRef,
+        destination: &Operand,
         width: u8,
-        writes: &mut Vec<RegisterWriteDelta>,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        memory_writes: &mut Vec<MemoryWriteDelta>,
         events: &mut Vec<StepEvent>,
-    ) -> String {
-        let right = self.read_operand(source, width, events);
-        let left = self.registers.read(destination);
-        events.push(StepEvent::RegisterRead {
-            register: destination.name().to_string(),
-            value: format_width(left, width),
-            width,
-        });
+    ) -> Result<String, RuntimeFault> {
+        let right = self.read_operand(source, width, events)?;
+        let left = self.read_operand(destination, width, events)?;
         let (result, flags) = arithmetic(kind, left, right, width);
         let old_flags = self.flags;
+        self.write_operand(
+            destination,
+            result,
+            width,
+            register_writes,
+            memory_writes,
+            events,
+        )?;
         self.flags = flags;
-        self.write_register(destination, result, writes, events);
         events.push(StepEvent::Arithmetic {
             operation: kind.name().to_string(),
             left: format_width(left, width),
@@ -481,66 +640,352 @@ impl Machine {
             before: FlagsView::from(old_flags),
             after: FlagsView::from(flags),
         });
-        format!(
-            "AT&T syntax puts the destination on the right: %{} = {} {} {} = {}.",
-            destination.name(),
+        Ok(format!(
+            "AT&T syntax puts the destination on the right: {} = {} {} {} = {}.",
+            operand_name(destination),
             format_width(left, width),
             kind.symbol(),
             format_width(right, width),
             format_width(result, width)
+        ))
+    }
+
+    fn apply_compare(
+        &mut self,
+        source: &Operand,
+        destination: &Operand,
+        width: u8,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<String, RuntimeFault> {
+        let right = self.read_operand(source, width, events)?;
+        let left = self.read_operand(destination, width, events)?;
+        let (result, flags) = arithmetic(ArithmeticKind::Sub, left, right, width);
+        let old_flags = self.flags;
+        self.flags = flags;
+        events.push(StepEvent::Compare {
+            destination: format_width(left, width),
+            source: format_width(right, width),
+            result: format_width(result, width),
+            width,
+        });
+        events.push(StepEvent::FlagsChanged {
+            before: old_flags.into(),
+            after: flags.into(),
+        });
+        Ok(format!(
+            "cmp sets flags from destination minus source: {} − {} = {}; it stores no result.",
+            format_width(left, width),
+            format_width(right, width),
+            format_width(result, width)
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_xor(
+        &mut self,
+        source: &Operand,
+        destination: &Operand,
+        width: u8,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        memory_writes: &mut Vec<MemoryWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<String, RuntimeFault> {
+        let right = self.read_operand(source, width, events)?;
+        let left = self.read_operand(destination, width, events)?;
+        let result = (left ^ right) & width_mask(width);
+        let flags = logical_flags(result, width);
+        let old_flags = self.flags;
+        self.write_operand(
+            destination,
+            result,
+            width,
+            register_writes,
+            memory_writes,
+            events,
+        )?;
+        self.flags = flags;
+        events.push(StepEvent::Arithmetic {
+            operation: "xor".to_string(),
+            left: format_width(left, width),
+            right: format_width(right, width),
+            result: format_width(result, width),
+            width,
+        });
+        events.push(StepEvent::FlagsChanged {
+            before: old_flags.into(),
+            after: flags.into(),
+        });
+        Ok(format!(
+            "{} = {} XOR {} = {}. xor clears CF and OF and updates ZF, SF, and PF.",
+            operand_name(destination),
+            format_width(left, width),
+            format_width(right, width),
+            format_width(result, width)
+        ))
+    }
+
+    fn apply_jump(
+        &mut self,
+        condition: JumpCondition,
+        target: usize,
+        target_label: &str,
+        events: &mut Vec<StepEvent>,
+    ) -> String {
+        let taken = condition.evaluate(self.flags);
+        let predicate = condition.predicate(self.flags);
+        if taken {
+            self.pc = target;
+        }
+        events.push(StepEvent::Branch {
+            condition: condition.mnemonic().to_string(),
+            predicate: predicate.clone(),
+            target: target_label.to_string(),
+            taken,
+        });
+        format!(
+            "{} checks {}. The predicate is {}, so the branch to `{}` is {}.",
+            condition.mnemonic(),
+            condition.meaning(),
+            predicate,
+            target_label,
+            if taken { "taken" } else { "not taken" }
         )
     }
 
-    fn apply_syscall(&mut self, events: &mut Vec<StepEvent>) -> String {
+    fn apply_syscall(
+        &mut self,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<String, RuntimeFault> {
         let rax = RegisterRef::parse("rax").unwrap();
         let rdi = RegisterRef::parse("rdi").unwrap();
-        let number = self.registers.read(rax);
-        events.push(StepEvent::RegisterRead {
-            register: "rax".to_string(),
-            value: hex64(number),
-            width: 64,
-        });
+        let number = self.read_register(rax, events);
         events.push(StepEvent::Syscall {
             number: number.to_string(),
-            name: (number == 60).then(|| "exit".to_string()),
+            name: match number {
+                1 => Some("write".to_string()),
+                60 => Some("exit".to_string()),
+                _ => None,
+            },
         });
-        if number == 60 {
-            let raw = self.registers.read(rdi);
-            events.push(StepEvent::RegisterRead {
-                register: "rdi".to_string(),
-                value: hex64(raw),
-                width: 64,
-            });
-            let shell_status = (raw & 0xff) as u8;
-            let signed = (raw as i64).to_string();
-            self.status = MachineStatus::Exited {
-                raw_hex: hex64(raw),
-                signed: signed.clone(),
-                shell_status,
-            };
-            events.push(StepEvent::Exit {
-                raw_hex: hex64(raw),
-                signed,
-                shell_status,
-            });
-            format!(
-                "syscall 60 is exit. %rdi contains {}; a shell reports only its low 8 bits, {}.",
-                raw as i64, shell_status
-            )
-        } else {
-            let message = format!(
-                "syscall {number} is outside the current Lecture 3 slice (only exit/60 is ready)"
-            );
-            self.status = MachineStatus::Faulted {
-                code: "unsupported_syscall".to_string(),
-                message: message.clone(),
-            };
-            events.push(StepEvent::Fault {
-                code: "unsupported_syscall".to_string(),
-                message: message.clone(),
-            });
-            message
+        match number {
+            1 => {
+                let rsi = RegisterRef::parse("rsi").unwrap();
+                let rdx = RegisterRef::parse("rdx").unwrap();
+                let fd = self.read_register(rdi, events);
+                let address = self.read_register(rsi, events);
+                let count = self.read_register(rdx, events);
+                if !matches!(fd, 1 | 2) {
+                    return Err(RuntimeFault::new(
+                        "bad_file_descriptor",
+                        format!(
+                            "write uses file descriptor {fd}; this teaching process exposes stdout as 1 and stderr as 2"
+                        ),
+                    ));
+                }
+                let count = usize::try_from(count).map_err(|_| {
+                    RuntimeFault::new("invalid_write_count", "write byte count does not fit usize")
+                })?;
+                let bytes = self.read_bytes(address, count)?;
+                events.push(StepEvent::EffectiveAddress {
+                    expression: "buffer address from %rsi".to_string(),
+                    address: hex64(address),
+                    symbol: self.symbol_for_address(address),
+                });
+                events.push(StepEvent::MemoryRead {
+                    address: hex64(address),
+                    value: format_bytes(&bytes),
+                    width: count.saturating_mul(8),
+                    symbol: self.symbol_for_address(address),
+                });
+                if fd == 1 {
+                    self.stdout.extend_from_slice(&bytes);
+                } else {
+                    self.stderr.extend_from_slice(&bytes);
+                }
+                let escaped = escaped_bytes(&bytes);
+                events.push(StepEvent::Output {
+                    fd,
+                    bytes,
+                    escaped: escaped.clone(),
+                });
+                self.write_register(rax, count as u64, register_writes, events);
+                Ok(format!(
+                    "syscall 1 is write. fd={fd}, buffer={}, count={count}; it emitted `{escaped}` and returned {count} in %rax.",
+                    hex64(address)
+                ))
+            }
+            60 => {
+                let raw = self.read_register(rdi, events);
+                let shell_status = (raw & 0xff) as u8;
+                let signed = (raw as i64).to_string();
+                self.status = MachineStatus::Exited {
+                    raw_hex: hex64(raw),
+                    signed: signed.clone(),
+                    shell_status,
+                };
+                events.push(StepEvent::Exit {
+                    raw_hex: hex64(raw),
+                    signed,
+                    shell_status,
+                });
+                Ok(format!(
+                    "syscall 60 is exit. %rdi contains {}; a shell reports only its low 8 bits, {}.",
+                    raw as i64, shell_status
+                ))
+            }
+            _ => Err(RuntimeFault::new(
+                "unsupported_syscall",
+                format!(
+                    "syscall {number} is outside the current Lecture 4 slice (write/1 and exit/60 are ready)"
+                ),
+            )),
         }
+    }
+
+    fn read_register(&self, register: RegisterRef, events: &mut Vec<StepEvent>) -> u64 {
+        let value = self.registers.read(register);
+        events.push(StepEvent::RegisterRead {
+            register: register.name().to_string(),
+            value: hex64(value),
+            width: register.width(),
+        });
+        value
+    }
+
+    fn effective_address(
+        &self,
+        address: &MemoryAddress,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<u64, RuntimeFault> {
+        let mut value = if address.rip_relative {
+            address
+                .symbol_address
+                .expect("parser requires a symbol for RIP-relative addressing")
+        } else {
+            address.symbol_address.unwrap_or(0)
+        };
+        value = value.wrapping_add_signed(address.displacement);
+        if let Some(base) = address.base {
+            value = value.wrapping_add(self.read_register(base, events));
+        }
+        if let Some(index) = address.index {
+            value = value.wrapping_add(
+                self.read_register(index, events)
+                    .wrapping_mul(u64::from(address.scale)),
+            );
+        }
+        events.push(StepEvent::EffectiveAddress {
+            expression: address.text.clone(),
+            address: hex64(value),
+            symbol: address
+                .symbol
+                .clone()
+                .or_else(|| self.symbol_for_address(value)),
+        });
+        Ok(value)
+    }
+
+    fn read_memory(
+        &self,
+        address: &MemoryAddress,
+        width: u8,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<u64, RuntimeFault> {
+        let effective = self.effective_address(address, events)?;
+        let bytes = self.read_bytes(effective, usize::from(width / 8))?;
+        let mut padded = [0_u8; 8];
+        padded[..bytes.len()].copy_from_slice(&bytes);
+        let value = u64::from_le_bytes(padded);
+        events.push(StepEvent::MemoryRead {
+            address: hex64(effective),
+            value: format_width(value, width),
+            width: usize::from(width),
+            symbol: address
+                .symbol
+                .clone()
+                .or_else(|| self.symbol_for_address(effective)),
+        });
+        Ok(value)
+    }
+
+    fn write_memory(
+        &mut self,
+        address: &MemoryAddress,
+        value: u64,
+        width: u8,
+        writes: &mut Vec<MemoryWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<(), RuntimeFault> {
+        let effective = self.effective_address(address, events)?;
+        let range = self.memory_range(effective, usize::from(width / 8))?;
+        let before = self.memory[range.clone()].to_vec();
+        let bytes = value.to_le_bytes();
+        let after = bytes[..range.len()].to_vec();
+        self.memory[range].copy_from_slice(&after);
+        let symbol = address
+            .symbol
+            .clone()
+            .or_else(|| self.symbol_for_address(effective));
+        writes.push(MemoryWriteDelta {
+            address: effective,
+            before: before.clone(),
+            after: after.clone(),
+            symbol: symbol.clone(),
+        });
+        events.push(StepEvent::MemoryWrite {
+            address: hex64(effective),
+            before: format_bytes(&before),
+            after: format_bytes(&after),
+            width: usize::from(width),
+            symbol,
+        });
+        Ok(())
+    }
+
+    fn read_bytes(&self, address: u64, count: usize) -> Result<Vec<u8>, RuntimeFault> {
+        let range = self.memory_range(address, count)?;
+        Ok(self.memory[range].to_vec())
+    }
+
+    fn memory_range(
+        &self,
+        address: u64,
+        count: usize,
+    ) -> Result<std::ops::Range<usize>, RuntimeFault> {
+        let Some(offset) = address.checked_sub(DATA_BASE) else {
+            return Err(self.memory_fault(address, count));
+        };
+        let Ok(offset) = usize::try_from(offset) else {
+            return Err(self.memory_fault(address, count));
+        };
+        let Some(end) = offset.checked_add(count) else {
+            return Err(self.memory_fault(address, count));
+        };
+        if end > self.memory.len() {
+            return Err(self.memory_fault(address, count));
+        }
+        Ok(offset..end)
+    }
+
+    fn memory_fault(&self, address: u64, count: usize) -> RuntimeFault {
+        RuntimeFault::new(
+            "unmapped_memory",
+            format!(
+                "memory access at {} for {count} byte(s) is outside the mapped .data range {}..{}",
+                hex64(address),
+                hex64(DATA_BASE),
+                hex64(DATA_BASE + self.memory.len() as u64)
+            ),
+        )
+    }
+
+    fn symbol_for_address(&self, address: u64) -> Option<String> {
+        self.data_symbols
+            .iter()
+            .filter(|(_, symbol_address)| **symbol_address <= address)
+            .max_by_key(|(_, symbol_address)| *symbol_address)
+            .map(|(name, _)| name.clone())
     }
 
     pub(crate) fn undo(&mut self, delta: &StepDelta) {
@@ -548,9 +993,30 @@ impl Machine {
             self.registers
                 .restore(write.register.canonical(), write.before);
         }
+        for write in delta.memory_writes.iter().rev() {
+            let offset = (write.address - DATA_BASE) as usize;
+            self.memory[offset..offset + write.before.len()].copy_from_slice(&write.before);
+        }
+        self.stdout.truncate(delta.stdout_len_before);
+        self.stderr.truncate(delta.stderr_len_before);
         self.flags = delta.flags_before;
         self.pc = delta.pc_before;
         self.status = delta.status_before.clone();
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeFault {
+    code: &'static str,
+    message: String,
+}
+
+impl RuntimeFault {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 }
 
@@ -558,6 +1024,86 @@ impl Machine {
 enum ArithmeticKind {
     Add,
     Sub,
+}
+
+impl JumpCondition {
+    fn mnemonic(self) -> &'static str {
+        match self {
+            Self::Always => "jmp",
+            Self::Equal => "je",
+            Self::NotEqual => "jne",
+            Self::Less => "jl",
+            Self::LessOrEqual => "jle",
+            Self::Greater => "jg",
+            Self::GreaterOrEqual => "jge",
+            Self::Below => "jb",
+            Self::BelowOrEqual => "jbe",
+            Self::Above => "ja",
+            Self::AboveOrEqual => "jae",
+        }
+    }
+
+    fn meaning(self) -> &'static str {
+        match self {
+            Self::Always => "an unconditional branch",
+            Self::Equal => "equality (ZF = 1)",
+            Self::NotEqual => "inequality (ZF = 0)",
+            Self::Less => "signed less-than (SF ≠ OF)",
+            Self::LessOrEqual => "signed less-or-equal (ZF = 1 or SF ≠ OF)",
+            Self::Greater => "signed greater-than (ZF = 0 and SF = OF)",
+            Self::GreaterOrEqual => "signed greater-or-equal (SF = OF)",
+            Self::Below => "unsigned below (CF = 1)",
+            Self::BelowOrEqual => "unsigned below-or-equal (CF = 1 or ZF = 1)",
+            Self::Above => "unsigned above (CF = 0 and ZF = 0)",
+            Self::AboveOrEqual => "unsigned above-or-equal (CF = 0)",
+        }
+    }
+
+    fn evaluate(self, flags: Flags) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Equal => flags.zf,
+            Self::NotEqual => !flags.zf,
+            Self::Less => flags.sf != flags.of,
+            Self::LessOrEqual => flags.zf || flags.sf != flags.of,
+            Self::Greater => !flags.zf && flags.sf == flags.of,
+            Self::GreaterOrEqual => flags.sf == flags.of,
+            Self::Below => flags.cf,
+            Self::BelowOrEqual => flags.cf || flags.zf,
+            Self::Above => !flags.cf && !flags.zf,
+            Self::AboveOrEqual => !flags.cf,
+        }
+    }
+
+    fn predicate(self, flags: Flags) -> String {
+        match self {
+            Self::Always => "always true".to_string(),
+            Self::Equal => format!("ZF={}", bit(flags.zf)),
+            Self::NotEqual => format!("ZF={} (needs 0)", bit(flags.zf)),
+            Self::Less => format!("SF={} and OF={}", bit(flags.sf), bit(flags.of)),
+            Self::LessOrEqual => format!(
+                "ZF={} or SF={} differs from OF={}",
+                bit(flags.zf),
+                bit(flags.sf),
+                bit(flags.of)
+            ),
+            Self::Greater => format!(
+                "ZF={} and SF={} equals OF={}",
+                bit(flags.zf),
+                bit(flags.sf),
+                bit(flags.of)
+            ),
+            Self::GreaterOrEqual => {
+                format!("SF={} equals OF={}", bit(flags.sf), bit(flags.of))
+            }
+            Self::Below => format!("CF={}", bit(flags.cf)),
+            Self::BelowOrEqual => {
+                format!("CF={} or ZF={}", bit(flags.cf), bit(flags.zf))
+            }
+            Self::Above => format!("CF={} and ZF={}", bit(flags.cf), bit(flags.zf)),
+            Self::AboveOrEqual => format!("CF={} (needs 0)", bit(flags.cf)),
+        }
+    }
 }
 
 impl ArithmeticKind {
@@ -610,6 +1156,18 @@ fn arithmetic(kind: ArithmeticKind, left: u64, right: u64, width: u8) -> (u64, F
     )
 }
 
+fn logical_flags(result: u64, width: u8) -> Flags {
+    let result = result & width_mask(width);
+    Flags {
+        cf: false,
+        pf: (result as u8).count_ones() & 1 == 0,
+        af: false,
+        zf: result == 0,
+        sf: result & (1_u64 << (width - 1)) != 0,
+        of: false,
+    }
+}
+
 fn width_mask(width: u8) -> u64 {
     match width {
         64 => u64::MAX,
@@ -628,11 +1186,39 @@ fn format_width(value: u64, width: u8) -> String {
     )
 }
 
+fn format_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn operand_name(operand: &Operand) -> String {
+    match operand {
+        Operand::Immediate(value) => format!("${}", hex64(*value)),
+        Operand::Register(register) => format!("%{}", register.name()),
+        Operand::Memory(address) => address.text.clone(),
+    }
+}
+
+fn bit(value: bool) -> u8 {
+    u8::from(value)
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RegisterWriteDelta {
     register: RegisterRef,
     before: u64,
     after: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct MemoryWriteDelta {
+    address: u64,
+    before: Vec<u8>,
+    after: Vec<u8>,
+    symbol: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -648,6 +1234,9 @@ pub(crate) struct StepDelta {
     #[allow(dead_code)]
     flags_after: Flags,
     register_writes: Vec<RegisterWriteDelta>,
+    memory_writes: Vec<MemoryWriteDelta>,
+    stdout_len_before: usize,
+    stderr_len_before: usize,
 }
 
 impl StepDelta {
@@ -670,6 +1259,18 @@ impl StepDelta {
                 after: self.flags_before.into(),
             });
         }
+        events.extend(
+            self.memory_writes
+                .iter()
+                .rev()
+                .map(|write| StepEvent::MemoryWrite {
+                    address: hex64(write.address),
+                    before: format_bytes(&write.after),
+                    after: format_bytes(&write.before),
+                    width: write.before.len() * 8,
+                    symbol: write.symbol.clone(),
+                }),
+        );
         events
     }
 }
@@ -720,5 +1321,30 @@ mod tests {
         assert!(flags.cf);
         assert!(flags.sf);
         assert!(!flags.zf);
+    }
+
+    #[test]
+    fn signed_and_unsigned_jumps_read_different_flags() {
+        let signed_less_with_overflow = Flags {
+            sf: false,
+            of: true,
+            cf: false,
+            zf: false,
+            ..Flags::default()
+        };
+        assert!(JumpCondition::Less.evaluate(signed_less_with_overflow));
+        assert!(!JumpCondition::GreaterOrEqual.evaluate(signed_less_with_overflow));
+        assert!(!JumpCondition::Below.evaluate(signed_less_with_overflow));
+        assert!(JumpCondition::Above.evaluate(signed_less_with_overflow));
+
+        let equal = Flags {
+            zf: true,
+            ..Flags::default()
+        };
+        assert!(JumpCondition::Equal.evaluate(equal));
+        assert!(JumpCondition::LessOrEqual.evaluate(equal));
+        assert!(JumpCondition::BelowOrEqual.evaluate(equal));
+        assert!(!JumpCondition::Greater.evaluate(equal));
+        assert!(!JumpCondition::Above.evaluate(equal));
     }
 }

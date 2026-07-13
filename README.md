@@ -4,21 +4,25 @@
 CS201. It runs GNU/AT&T-syntax assembly one instruction at a time and explains
 the resulting register, flag, and process-state changes.
 
-The first student-testable slice is working. It covers the maintained Lecture
-3 progression (`first.s`, `firstfixed.s`, `firstadd.s`, and `firstsub.s`) in two
-interfaces over one Rust execution core:
+The first two student-testable slices are working. They cover the 15 distinct
+programs in the maintained Lecture 3–4 progression, spanning register
+arithmetic, data, addressing, branches, loops, and process output. (Lecture 4's
+annotated repeat of `firstadd.s` is represented by the same Lecture 3 lesson.)
+Both interfaces run over one Rust execution core:
 
 - a React/TypeScript browser visualizer using the core through WebAssembly;
 - a native Rust binary with a full-screen TUI, line-oriented REPL, and
   scriptable `run`, `check`, and JSONL `trace` modes.
 
 Both interfaces have exact `u64` register behavior, all general-purpose
-register aliases, arithmetic flags, Linux `exit`, strict source diagnostics,
-structured explanations, reset, and reversible stepping. The browser also has
-an in-app guided tutorial.
+register aliases, little-endian data memory, arithmetic flags, signed and
+unsigned branches, Linux `write`/`exit`, strict source diagnostics, structured
+explanations, reset, and reversible stepping. Memory writes, branch decisions,
+and process output are reversible too. The browser includes guided register and
+memory tutorials.
 
-This is not yet the full lectures 3–6 target described in the design. Memory,
-data sections, branches, calls, the stack, and `read`/`write` are the next
+This is not yet the full Lectures 3–6 target described in the design. Calls,
+the stack, integer I/O helpers, and the later instruction families are the next
 course-shaped slices. Unsupported syntax is rejected explicitly instead of
 being guessed or silently repaired.
 
@@ -41,8 +45,8 @@ Other useful commands:
 
 ```sh
 cargo run -p x86-63-cli -- examples
-cargo run -p x86-63-cli -- check course-content/lecture3/firstadd.s
-cargo run -p x86-63-cli -- run --example firstfixed
+cargo run -p x86-63-cli -- check course-content/lecture4/addArray3.s
+cargo run -p x86-63-cli -- run --example hello
 cargo run -p x86-63-cli -- trace --example firstsub
 ```
 
@@ -58,21 +62,25 @@ npm install
 npm run web:dev
 ```
 
-Open the local address printed by Vite and choose **Guided tutorial**. A static
-production build is created with `npm run web:build`; it has no server-side
-runtime dependency.
+Open the local address printed by Vite. Choose **Guided tutorial** for registers
+and arithmetic, or **Memory tutorial** for `lea`, scaled indexing,
+little-endian data, and reversible writes. A static production build is created
+with `npm run web:build`; it has no server-side runtime dependency.
 
 ## Verify the slice
 
 ```sh
 cargo test --workspace
+./scripts/differential-lecture4.sh
 npm run wasm:test
 npm run web:build
 ```
 
-The native integration tests and the Node/WASM smoke test run the same four
-maintained lessons and assert their expected fault/exit outcomes, including
-reverse stepping and 64-bit-safe JSON transport.
+The native integration tests and Node/WASM smoke test run all 15 maintained
+lessons and assert register, memory, branch, output, fault, and exit outcomes,
+including reverse stepping and 64-bit-safe JSON transport. The differential
+script assembles and runs all 11 new Lecture 4 fixtures with GNU `as`/`ld`,
+then compares their shell statuses and output bytes with the teaching machine.
 
 ## Documentation
 

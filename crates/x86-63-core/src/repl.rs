@@ -4,6 +4,8 @@ use crate::Command;
 pub enum ReplInput {
     Command(Command),
     Registers,
+    Memory,
+    Output,
     Why,
     Help,
     Quit,
@@ -21,6 +23,8 @@ pub fn parse_repl_input(input: &str) -> ReplInput {
         "r" | "reset" | "start" => ReplInput::Command(Command::Reset),
         "c" | "continue" | "run" => ReplInput::Command(Command::Continue { max_steps: 10_000 }),
         "regs" | "registers" | "info registers" => ReplInput::Registers,
+        "mem" | "memory" | "x/data" => ReplInput::Memory,
+        "io" | "output" | "stdout" => ReplInput::Output,
         "why" => ReplInput::Why,
         "h" | "help" | "?" => ReplInput::Help,
         "q" | "quit" | "exit" => ReplInput::Quit,

@@ -335,6 +335,97 @@ button.primary {
   font-size: 0.85rem;
 }
 
+.memory-size {
+  color: #64756c;
+  font-size: 0.78rem;
+}
+
+.memory-symbols {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.memory-symbol header {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.75rem;
+  margin-bottom: 0.4rem;
+}
+
+.memory-symbol header code {
+  color: #52665d;
+  font-size: 0.76rem;
+}
+
+.memory-symbol header small {
+  color: #64756c;
+  margin-left: auto;
+}
+
+.memory-elements {
+  display: grid;
+  gap: 0.3rem;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+}
+
+.memory-element {
+  background: #f0f2ed;
+  border-left: 4px solid transparent;
+  border-radius: 0.35rem;
+  display: grid;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  gap: 0.2rem;
+  padding: 0.42rem 0.5rem;
+}
+
+.memory-element.changed {
+  background: #ffe08a;
+  border-left-color: #b97b00;
+}
+
+.memory-element small {
+  color: #65756d;
+  font-size: 0.67rem;
+}
+
+.memory-element code {
+  color: #31463c;
+  font-size: 0.78rem;
+}
+
+.memory-element strong {
+  font-size: 0.9rem;
+}
+
+.output-stream {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.output-stream + .output-stream {
+  border-top: 1px solid #d7ddd8;
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+}
+
+.output-stream pre {
+  background: #15221d;
+  border-radius: 0.4rem;
+  color: #e8f5e9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin: 0;
+  min-height: 2.5rem;
+  padding: 0.65rem;
+  white-space: pre-wrap;
+}
+
+.output-stream > code {
+  color: #53685e;
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
 .explanation-panel h2 {
   font-family: Georgia, serif;
   font-size: 1.2rem;
@@ -390,6 +481,16 @@ button.primary {
   .flags-panel {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .lesson-bar label {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .lesson-bar select {
+    min-width: 0;
+    width: 100%;
   }
 
   .register-grid {

@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::diagnostic::Diagnostic;
 use crate::machine::{CanonicalRegister, Machine, StepDelta};
 use crate::parser::compile;
-use crate::program::{Program, ProgramView, SourceModule};
+use crate::program::{DATA_BASE, Program, ProgramView, SourceModule};
 use crate::protocol::{
-    Command, CommandResult, MachineView, PROTOCOL_VERSION, RegisterView, StepEvent, hex64,
+    Command, CommandResult, IoView, MachineView, MemoryView, PROTOCOL_VERSION, RegisterView,
+    StepEvent, escaped_bytes, hex64,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,7 +38,7 @@ pub struct Session {
 impl Session {
     pub fn from_modules(modules: Vec<SourceModule>) -> Result<Self, BuildError> {
         let program = compile(modules).map_err(|diagnostics| BuildError { diagnostics })?;
-        let machine = Machine::new(program.entry());
+        let machine = Machine::new(&program);
         Ok(Self {
             program,
             machine,
@@ -58,6 +59,7 @@ impl Session {
 
     pub fn view(&self) -> MachineView {
         let next = self.program.instruction(self.machine.pc);
+        let symbols = self.program.view().symbols;
         MachineView {
             protocol_version: PROTOCOL_VERSION,
             status: self.machine.status.clone(),
@@ -76,6 +78,17 @@ impl Session {
                 })
                 .collect(),
             flags: self.machine.flags.into(),
+            memory: MemoryView {
+                base: hex64(DATA_BASE),
+                bytes: self.machine.memory.clone(),
+                symbols,
+            },
+            io: IoView {
+                stdout_bytes: self.machine.stdout.clone(),
+                stdout_escaped: escaped_bytes(&self.machine.stdout),
+                stderr_bytes: self.machine.stderr.clone(),
+                stderr_escaped: escaped_bytes(&self.machine.stderr),
+            },
             history_depth: self.history.len(),
         }
     }
@@ -89,7 +102,7 @@ impl Session {
     }
 
     fn reset(&mut self) -> CommandResult {
-        self.machine = Machine::new(self.program.entry());
+        self.machine = Machine::new(&self.program);
         self.history.clear();
         self.last_explanation =
             "Reset to _start. Registers are zero except for the aligned stack pointer.".to_string();
@@ -229,5 +242,59 @@ mod tests {
                 ..
             } if canonical == "rax" && after == "0x0000000000000000"
         )));
+    }
+
+    #[test]
+    fn unmapped_data_access_faults_and_can_be_reversed() {
+        let mut session = session(
+            ".data\nnum: .quad 1\n.text\n.global _start\n_start:\n lea num(%rip),%rbx\n add $8,%rbx\n movq (%rbx),%rdi\n",
+        );
+        let fault = session.execute(Command::Continue { max_steps: 10 });
+        assert!(matches!(
+            fault.view.status,
+            MachineStatus::Faulted { ref code, .. } if code == "unmapped_memory"
+        ));
+        assert_eq!(fault.view.memory.bytes, 1_u64.to_le_bytes());
+        assert!(fault.events.iter().any(|event| matches!(
+            event,
+            StepEvent::EffectiveAddress { address, .. }
+                if address == "0x0000000000400008"
+        )));
+
+        let reversed = session.execute(Command::Back);
+        assert_eq!(reversed.view.status, MachineStatus::Paused);
+        assert_eq!(
+            reversed.view.next_text.as_deref().map(str::trim),
+            Some("movq (%rbx),%rdi")
+        );
+    }
+
+    #[test]
+    fn write_rejects_unknown_file_descriptors_without_output() {
+        let mut session = session(
+            ".data\nmsg: .byte 65\n.text\n.global _start\n_start:\n mov $1,%rax\n mov $9,%rdi\n lea msg(%rip),%rsi\n mov $1,%rdx\n syscall\n",
+        );
+        let fault = session.execute(Command::Continue { max_steps: 10 });
+        assert!(matches!(
+            fault.view.status,
+            MachineStatus::Faulted { ref code, .. } if code == "bad_file_descriptor"
+        ));
+        assert!(fault.view.io.stdout_bytes.is_empty());
+        assert!(fault.view.io.stderr_bytes.is_empty());
+    }
+
+    #[test]
+    fn continue_stops_at_its_safety_limit_inside_a_loop() {
+        let mut session = session(".text\n.global _start\n_start:\n jmp _start\n");
+        let result = session.execute(Command::Continue { max_steps: 3 });
+        assert_eq!(result.steps_executed, 3);
+        assert_eq!(result.view.status, MachineStatus::Paused);
+        assert_eq!(result.view.history_depth, 3);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E302")
+        );
     }
 }

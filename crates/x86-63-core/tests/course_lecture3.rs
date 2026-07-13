@@ -11,7 +11,10 @@ fn register<'a>(view: &'a MachineView, name: &str) -> &'a str {
 
 #[test]
 fn maintained_lecture_3_examples_have_the_expected_outcomes() {
-    for lesson in x86_63_course::lessons() {
+    for lesson in x86_63_course::lessons()
+        .iter()
+        .filter(|lesson| lesson.lecture == 3)
+    {
         let mut session =
             Session::from_modules(vec![SourceModule::new(lesson.module_name, lesson.source)])
                 .unwrap_or_else(|error| panic!("{} did not assemble: {error}", lesson.id));

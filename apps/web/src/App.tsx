@@ -19,6 +19,8 @@ type TutorialStep = {
   check: (view: MachineView) => boolean;
 };
 
+type TutorialKind = "registers" | "memory";
+
 const emptyFlags = { cf: false, pf: false, af: false, zf: false, sf: false, of: false };
 
 export default function App() {
@@ -33,6 +35,7 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
   const [bootError, setBootError] = useState<string | null>(null);
   const [tutorialOpen, setTutorialOpen] = useState(false);
+  const [tutorialKind, setTutorialKind] = useState<TutorialKind>("registers");
   const [tutorialStep, setTutorialStep] = useState(0);
   const [tutorialFeedback, setTutorialFeedback] = useState<string | null>(null);
 
@@ -102,13 +105,15 @@ export default function App() {
     setTutorialFeedback(null);
   };
 
-  const startTutorial = () => {
-    const lesson = lessons.find((candidate) => candidate.id === "firstadd");
+  const startTutorial = (kind: TutorialKind = "registers") => {
+    const lessonId = kind === "memory" ? "addarray3" : "firstadd";
+    const lesson = lessons.find((candidate) => candidate.id === lessonId);
     if (!lesson) return;
     setSelectedId(lesson.id);
     setModuleName(lesson.module_name);
     setSource(lesson.source);
     loadSession(lesson.module_name, lesson.source);
+    setTutorialKind(kind);
     setTutorialStep(0);
     setTutorialFeedback(null);
     setTutorialOpen(true);
@@ -116,7 +121,8 @@ export default function App() {
 
   const checkTutorial = () => {
     if (!view) return;
-    const step = tutorialSteps[tutorialStep] ?? tutorialSteps[0]!;
+    const steps = tutorialKind === "memory" ? memoryTutorialSteps : registerTutorialSteps;
+    const step = steps[tutorialStep] ?? steps[0]!;
     setTutorialFeedback(
       step.check(view)
         ? `Looks right. ${step.expected}`
@@ -134,6 +140,18 @@ export default function App() {
       ),
     [result]
   );
+  const changedMemory = useMemo(() => {
+    const offsets = new Set<number>();
+    if (!view) return offsets;
+    for (const event of result?.events ?? []) {
+      if (event.kind !== "memory_write" || !event.address || !event.width) continue;
+      const start = Number(BigInt(event.address) - BigInt(view.memory.base));
+      for (let offset = start; offset < start + event.width / 8; offset += 1) {
+        offsets.add(offset);
+      }
+    }
+    return offsets;
+  }, [result, view]);
 
   if (bootError) {
     return <main className="fatal">Could not start x86-63: {bootError}</main>;
@@ -153,16 +171,35 @@ export default function App() {
         <label>
           Example
           <select value={selectedId} onChange={(event) => chooseLesson(event.target.value)}>
-            {lessons.map((lesson) => (
-              <option key={lesson.id} value={lesson.id}>
-                {lesson.title}
-              </option>
-            ))}
+            {Array.from(new Set(lessons.map((lesson) => lesson.lecture)))
+              .sort((left, right) => left - right)
+              .map((lecture) => (
+                <optgroup label={`Lecture ${lecture}`} key={lecture}>
+                  {lessons
+                    .filter((lesson) => lesson.lecture === lecture)
+                    .map((lesson) => (
+                      <option key={lesson.id} value={lesson.id}>
+                        {lesson.title}
+                      </option>
+                    ))}
+                </optgroup>
+              ))}
           </select>
         </label>
         <div className="control-group">
-          <button className="tutorial-trigger" onClick={startTutorial} disabled={!lessons.length}>
+          <button
+            className="tutorial-trigger"
+            onClick={() => startTutorial("registers")}
+            disabled={!lessons.length}
+          >
             Guided tutorial
+          </button>
+          <button
+            className="tutorial-trigger memory-tutorial-trigger"
+            onClick={() => startTutorial("memory")}
+            disabled={!lessons.length}
+          >
+            Memory tutorial
           </button>
           <button onClick={() => loadSession(moduleName, source)} disabled={!lessons.length}>
             Assemble
@@ -190,22 +227,27 @@ export default function App() {
 
       {selectedLesson && (
         <section className="prediction">
-          <strong>Before you step:</strong> {selectedLesson.prediction}
+          <strong>Lecture {selectedLesson.lecture} · Before you step:</strong>{" "}
+          {selectedLesson.prediction}
         </section>
       )}
 
       {tutorialOpen && (
         <Tutorial
+          title={tutorialKind === "memory" ? "Memory and addressing" : "Registers and arithmetic"}
+          steps={tutorialKind === "memory" ? memoryTutorialSteps : registerTutorialSteps}
           step={tutorialStep}
           feedback={tutorialFeedback}
           onCheck={checkTutorial}
           onMove={(offset) => {
+            const length =
+              tutorialKind === "memory" ? memoryTutorialSteps.length : registerTutorialSteps.length;
             setTutorialStep((current) =>
-              Math.max(0, Math.min(tutorialSteps.length - 1, current + offset))
+              Math.max(0, Math.min(length - 1, current + offset))
             );
             setTutorialFeedback(null);
           }}
-          onRestart={startTutorial}
+          onRestart={() => startTutorial(tutorialKind)}
           onClose={() => setTutorialOpen(false)}
         />
       )}
@@ -261,6 +303,15 @@ export default function App() {
             <div className="history">history: {view?.history_depth ?? 0}</div>
           </section>
 
+          {view && view.memory.bytes.length > 0 && (
+            <MemoryPanel memory={view.memory} changed={changedMemory} />
+          )}
+
+          {view &&
+            (view.io.stdout_bytes.length > 0 || view.io.stderr_bytes.length > 0) && (
+              <OutputPanel io={view.io} />
+            )}
+
           <section className="panel explanation-panel" aria-live="polite">
             <p className="eyebrow">This step</p>
             <h2>{result?.explanation ?? "Ready at _start."}</h2>
@@ -275,6 +326,8 @@ export default function App() {
 }
 
 function Tutorial({
+  title,
+  steps,
   step,
   feedback,
   onCheck,
@@ -282,6 +335,8 @@ function Tutorial({
   onRestart,
   onClose
 }: {
+  title: string;
+  steps: TutorialStep[];
   step: number;
   feedback: string | null;
   onCheck: () => void;
@@ -289,12 +344,12 @@ function Tutorial({
   onRestart: () => void;
   onClose: () => void;
 }) {
-  const current = tutorialSteps[step] ?? tutorialSteps[0]!;
+  const current = steps[step] ?? steps[0]!;
   return (
     <section className="tutorial panel" aria-label="Guided tutorial">
       <div className="tutorial-copy">
         <p className="eyebrow">
-          Guided tutorial · {step + 1} of {tutorialSteps.length}
+          Guided tutorial · {title} · {step + 1} of {steps.length}
         </p>
         <h2>{current.title}</h2>
         <p>{current.instruction}</p>
@@ -303,7 +358,7 @@ function Tutorial({
       <div className="tutorial-controls">
         <button onClick={() => onMove(-1)} disabled={step === 0}>Previous</button>
         <button onClick={onCheck}>Check my screen</button>
-        {step < tutorialSteps.length - 1 ? (
+        {step < steps.length - 1 ? (
           <button className="primary" onClick={() => onMove(1)}>Next instruction</button>
         ) : (
           <button className="primary" onClick={onClose}>Finish</button>
@@ -334,7 +389,18 @@ function SourceListing({ program, view }: { program: ProgramView | null; view: M
 
 function EventSummary({ events }: { events: StepEvent[] }) {
   const useful = events.filter((event) =>
-    ["register_write", "arithmetic", "exit", "fault"].includes(event.kind)
+    [
+      "register_write",
+      "effective_address",
+      "memory_read",
+      "memory_write",
+      "arithmetic",
+      "compare",
+      "branch",
+      "output",
+      "exit",
+      "fault"
+    ].includes(event.kind)
   );
   if (useful.length === 0) return null;
   return (
@@ -352,6 +418,18 @@ function eventText(event: StepEvent): string {
       return `%${event.register}: ${event.before} → ${event.after}`;
     case "arithmetic":
       return `${event.operation}: ${event.left} and ${event.right} produced ${event.result}`;
+    case "effective_address":
+      return `${event.expression} resolves to ${event.address}${event.symbol ? ` (${event.symbol})` : ""}`;
+    case "memory_read":
+      return `read ${event.width} bits at ${event.address}: ${event.value}`;
+    case "memory_write":
+      return `wrote ${event.width} bits at ${event.address}: ${event.before} → ${event.after}`;
+    case "compare":
+      return `cmp: ${event.destination} − ${event.source} = ${event.result}`;
+    case "branch":
+      return `${event.condition} → ${event.target}: ${event.predicate}; ${event.taken ? "taken" : "not taken"}`;
+    case "output":
+      return `write(fd=${event.fd}): ${event.escaped}`;
     case "exit":
       return `The shell-visible status is ${event.shell_status}.`;
     case "fault":
@@ -359,6 +437,122 @@ function eventText(event: StepEvent): string {
     default:
       return event.kind;
   }
+}
+
+function MemoryPanel({
+  memory,
+  changed
+}: {
+  memory: MachineView["memory"];
+  changed: Set<number>;
+}) {
+  return (
+    <section className="panel memory-panel">
+      <div className="panel-heading">
+        <h2>Memory</h2>
+        <span className="memory-size">.data · {memory.bytes.length} bytes</span>
+      </div>
+      <div className="memory-symbols">
+        {memory.symbols.map((symbol) => {
+          const bytes = memory.bytes.slice(symbol.offset, symbol.offset + symbol.size);
+          const elements = chunk(bytes, symbol.element_width);
+          return (
+            <section className="memory-symbol" key={symbol.name}>
+              <header>
+                <strong>{symbol.name}</strong>
+                <code>{symbol.address}</code>
+                <small>
+                  {directiveName(symbol.element_width)} × {elements.length}
+                </small>
+              </header>
+              <div className="memory-elements">
+                {elements.map((element, index) => {
+                  const offset = symbol.offset + index * symbol.element_width;
+                  const isChanged = element.some((_, byte) => changed.has(offset + byte));
+                  return (
+                    <div className={`memory-element ${isChanged ? "changed" : ""}`} key={offset}>
+                      <small>
+                        [{index}] {addressAt(memory.base, offset)}
+                      </small>
+                      <code>{element.map(hexByte).join(" ")}</code>
+                      <strong>{littleEndianSigned(element)}</strong>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function OutputPanel({ io }: { io: MachineView["io"] }) {
+  return (
+    <section className="panel output-panel">
+      <div className="panel-heading">
+        <h2>Process output</h2>
+        <span className="memory-size">exact bytes stay visible</span>
+      </div>
+      {io.stdout_bytes.length > 0 && (
+        <div className="output-stream">
+          <strong>stdout</strong>
+          <pre>{renderBytes(io.stdout_bytes)}</pre>
+          <code>{io.stdout_escaped}</code>
+        </div>
+      )}
+      {io.stderr_bytes.length > 0 && (
+        <div className="output-stream">
+          <strong>stderr</strong>
+          <pre>{renderBytes(io.stderr_bytes)}</pre>
+          <code>{io.stderr_escaped}</code>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function chunk(values: number[], width: number): number[][] {
+  const result: number[][] = [];
+  for (let index = 0; index < values.length; index += width) {
+    result.push(values.slice(index, index + width));
+  }
+  return result;
+}
+
+function directiveName(width: number): string {
+  return ({ 1: ".byte", 2: ".word", 4: ".long", 8: ".quad" } as Record<number, string>)[width] ?? `${width}B`;
+}
+
+function addressAt(base: string, offset: number): string {
+  return `0x${(BigInt(base) + BigInt(offset)).toString(16).padStart(16, "0")}`;
+}
+
+function hexByte(value: number): string {
+  return value.toString(16).padStart(2, "0");
+}
+
+function littleEndianSigned(bytes: number[]): string {
+  let value = 0n;
+  bytes.forEach((byte, index) => {
+    value |= BigInt(byte) << BigInt(index * 8);
+  });
+  const bits = BigInt(bytes.length * 8);
+  const sign = 1n << (bits - 1n);
+  return (value & sign ? value - (1n << bits) : value).toString();
+}
+
+function renderBytes(bytes: number[]): string {
+  return bytes
+    .map((byte) => {
+      if (byte === 0) return "␀";
+      if (byte === 10) return "\n";
+      if (byte === 13) return "\r";
+      if (byte === 9) return "\t";
+      return byte >= 0x20 && byte <= 0x7e ? String.fromCharCode(byte) : `�`;
+    })
+    .join("");
 }
 
 function Diagnostics({ diagnostics }: { diagnostics: Diagnostic[] }) {
@@ -414,7 +608,20 @@ function registerUnsigned(view: MachineView, name: string): string | undefined {
   return view.registers.find((register) => register.name === name)?.unsigned;
 }
 
-const tutorialSteps: TutorialStep[] = [
+function memoryUnsigned(view: MachineView, symbolName: string, index: number): string | undefined {
+  const symbol = view.memory.symbols.find((candidate) => candidate.name === symbolName);
+  if (!symbol) return undefined;
+  const offset = symbol.offset + index * symbol.element_width;
+  const bytes = view.memory.bytes.slice(offset, offset + symbol.element_width);
+  if (bytes.length !== symbol.element_width) return undefined;
+  let value = 0n;
+  bytes.forEach((byte, byteIndex) => {
+    value |= BigInt(byte) << BigInt(byteIndex * 8);
+  });
+  return value.toString();
+}
+
+const registerTutorialSteps: TutorialStep[] = [
   {
     title: "Find the next instruction",
     instruction:
@@ -488,5 +695,97 @@ const tutorialSteps: TutorialStep[] = [
       view.status.kind === "exited" &&
       view.status.shell_status === 30 &&
       registerUnsigned(view, "rdi") === "30"
+  }
+];
+
+const memoryTutorialSteps: TutorialStep[] = [
+  {
+    title: "Read the data before the code",
+    instruction:
+      "Find `num` in the Memory panel. The `.quad` directive made four eight-byte little-endian elements. Do not step yet.",
+    expected: "Memory should contain 200, 300, 400, and 500; line 13 should be next.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 0 &&
+      view.next_instruction?.line === 13 &&
+      ["200", "300", "400", "500"].every(
+        (value, index) => memoryUnsigned(view, "num", index) === value
+      )
+  },
+  {
+    title: "Load an address, not an element",
+    instruction:
+      "Click Step for `lea num(%rip),%rbx`. Compare %rbx with the address printed beside `num` in Memory.",
+    expected: "%rbx should contain 4194304 (0x400000), while num[0] remains 200.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 1 &&
+      registerUnsigned(view, "rbx") === "4194304" &&
+      memoryUnsigned(view, "num", 0) === "200"
+  },
+  {
+    title: "Choose an index",
+    instruction:
+      "Step once more. `%rcx = 1` will become the index in `(%rbx,%rcx,8)`.",
+    expected: "%rcx should be 1 and line 17, the memory add, should be next.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 2 &&
+      registerUnsigned(view, "rcx") === "1" &&
+      view.next_instruction?.line === 17
+  },
+  {
+    title: "Evaluate base + index × scale",
+    instruction:
+      "Predict the address first: 0x400000 + 1×8. Then Step. The highlighted element and event receipt should agree.",
+    expected: "num[1] should change from 300 to 310; the other three elements should be unchanged.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 3 &&
+      ["200", "310", "400", "500"].every(
+        (value, index) => memoryUnsigned(view, "num", index) === value
+      )
+  },
+  {
+    title: "Undo the memory write",
+    instruction:
+      "Click Back. Reverse execution restores the bytes themselves, not only the source highlight.",
+    expected: "num[1] should be 300 again and history should return to 2.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 2 &&
+      memoryUnsigned(view, "num", 1) === "300"
+  },
+  {
+    title: "Replay the same write",
+    instruction:
+      "Click Step again. The effective address should resolve identically and num[1] should return to 310.",
+    expected: "num[1] should be 310 and history should be 3.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 3 &&
+      memoryUnsigned(view, "num", 1) === "310"
+  },
+  {
+    title: "Dereference the address",
+    instruction:
+      "Step over `movq (%rbx,%rcx,8),%rdi`. Parentheses mean read the value stored at the calculated address.",
+    expected: "%rdi should contain 310 and memory should still contain 310.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 4 &&
+      registerUnsigned(view, "rdi") === "310" &&
+      memoryUnsigned(view, "num", 1) === "310"
+  },
+  {
+    title: "Observe the shell boundary",
+    instruction:
+      "Click Run. Linux receives the full 64-bit value 310, while the shell reports only its low eight bits.",
+    expected: "The machine should exit with shell status 54 because 310 mod 256 = 54.",
+    check: (view) =>
+      view.status.kind === "exited" &&
+      view.status.shell_status === 54 &&
+      registerUnsigned(view, "rdi") === "310" &&
+      memoryUnsigned(view, "num", 1) === "310"
   }
 ];

@@ -50,7 +50,27 @@ export type MachineView = {
   next_text: string | null;
   registers: RegisterView[];
   flags: FlagsView;
+  memory: {
+    base: string;
+    bytes: number[];
+    symbols: SymbolView[];
+  };
+  io: {
+    stdout_bytes: number[];
+    stdout_escaped: string;
+    stderr_bytes: number[];
+    stderr_escaped: string;
+  };
   history_depth: number;
+};
+
+export type SymbolView = {
+  name: string;
+  address: string;
+  offset: number;
+  size: number;
+  element_width: number;
+  section: string;
 };
 
 export type StepEvent = {
@@ -66,6 +86,20 @@ export type StepEvent = {
   code?: string;
   message?: string;
   shell_status?: number;
+  address?: string;
+  value?: string;
+  symbol?: string | null;
+  expression?: string;
+  destination?: string;
+  source?: string;
+  predicate?: string;
+  condition?: string;
+  target?: string;
+  taken?: boolean;
+  fd?: number;
+  bytes?: number[];
+  escaped?: string;
+  width?: number;
 };
 
 export type CommandResult = {
@@ -81,5 +115,9 @@ export type ProgramView = {
   modules: { name: string; source: string }[];
   instructions: { index: number; location: SourceLocation; text: string }[];
   labels: Record<string, number>;
+  symbols: SymbolView[];
+  constants: Record<string, string>;
+  data_base: string;
+  data_size: number;
   entry: number;
 };

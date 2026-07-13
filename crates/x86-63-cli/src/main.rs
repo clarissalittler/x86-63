@@ -104,6 +104,8 @@ fn try_main() -> Result<(), String> {
             });
             display::print_result(&result);
             display::print_registers(&result.view);
+            display::print_memory(&result.view);
+            display::print_output(&result.view);
             Ok(())
         }
         Mode::Trace(input) => {

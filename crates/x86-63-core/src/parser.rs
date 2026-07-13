@@ -1,13 +1,20 @@
 use std::collections::BTreeMap;
 
 use crate::diagnostic::Diagnostic;
-use crate::machine::{Operand, Operation, RegisterRef};
-use crate::program::{Instruction, Program, SourceLocation, SourceModule};
+use crate::machine::{JumpCondition, MemoryAddress, Operand, Operation, RegisterRef};
+use crate::program::{DATA_BASE, Instruction, Program, SourceLocation, SourceModule};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Section {
     Text,
+    Data,
     Other,
+}
+
+#[derive(Clone, Debug)]
+struct RawInstruction {
+    text: String,
+    location: SourceLocation,
 }
 
 pub fn compile(modules: Vec<SourceModule>) -> Result<Program, Vec<Diagnostic>> {
@@ -19,42 +26,42 @@ pub fn compile(modules: Vec<SourceModule>) -> Result<Program, Vec<Diagnostic>> {
         )]);
     }
 
-    let mut instructions = Vec::new();
+    let mut raw_instructions = Vec::new();
     let mut labels = BTreeMap::new();
+    let mut data_symbols = BTreeMap::new();
+    let mut data_symbol_widths = BTreeMap::new();
+    let mut constants = BTreeMap::new();
+    let mut initial_data = Vec::new();
     let mut diagnostics = Vec::new();
 
     for module in &modules {
         let mut section = None;
         for (line_index, original) in module.source.lines().enumerate() {
-            let line_number = line_index + 1;
-            let column = original
-                .find(|character: char| !character.is_whitespace())
-                .unwrap_or(0)
-                + 1;
             let location = SourceLocation {
                 module: module.name.clone(),
-                line: line_number,
-                column,
+                line: line_index + 1,
+                column: original
+                    .find(|character: char| !character.is_whitespace())
+                    .unwrap_or(0)
+                    + 1,
             };
-            let mut code = original.split('#').next().unwrap_or("").trim();
+            let mut code = strip_comment(original).trim();
             if code.is_empty() {
                 continue;
             }
 
             while let Some((label, rest)) = take_label(code) {
-                if labels
-                    .insert(label.to_string(), instructions.len())
-                    .is_some()
-                {
-                    diagnostics.push(
-                        Diagnostic::error(
-                            "E102",
-                            format!("symbol `{label}` is defined more than once"),
-                            Some(location.clone()),
-                        )
-                        .with_help("rename one label or remove the duplicate definition"),
-                    );
-                }
+                define_label(
+                    label,
+                    section,
+                    raw_instructions.len(),
+                    initial_data.len(),
+                    &location,
+                    &mut labels,
+                    &mut data_symbols,
+                    &constants,
+                    &mut diagnostics,
+                );
                 code = rest.trim();
                 if code.is_empty() {
                     break;
@@ -64,12 +71,49 @@ pub fn compile(modules: Vec<SourceModule>) -> Result<Program, Vec<Diagnostic>> {
                 continue;
             }
 
-            if code.starts_with('.') {
-                parse_directive(code, &mut section, &location, &mut diagnostics);
+            if let Some((name, expression)) = take_equate(code) {
+                define_equate(
+                    name,
+                    expression,
+                    section,
+                    initial_data.len(),
+                    &location,
+                    &labels,
+                    &data_symbols,
+                    &mut constants,
+                    &mut diagnostics,
+                );
                 continue;
             }
 
-            if section != Some(Section::Text) {
+            if code.starts_with('.') {
+                let data_offset = initial_data.len();
+                let element_width = directive_element_width(code);
+                parse_directive(
+                    code,
+                    &mut section,
+                    &mut initial_data,
+                    &location,
+                    &mut diagnostics,
+                );
+                if let Some(element_width) = element_width {
+                    let address = DATA_BASE + data_offset as u64;
+                    for (name, _) in data_symbols
+                        .iter()
+                        .filter(|(_, symbol_address)| **symbol_address == address)
+                    {
+                        data_symbol_widths.insert(name.clone(), element_width);
+                    }
+                }
+                continue;
+            }
+
+            if section == Some(Section::Text) {
+                raw_instructions.push(RawInstruction {
+                    text: code.to_string(),
+                    location,
+                });
+            } else {
                 diagnostics.push(
                     Diagnostic::error(
                         "E110",
@@ -78,17 +122,25 @@ pub fn compile(modules: Vec<SourceModule>) -> Result<Program, Vec<Diagnostic>> {
                     )
                     .with_help("put `.section .text` before executable instructions"),
                 );
-                continue;
             }
+        }
+    }
 
-            match parse_instruction(code, location.clone()) {
-                Ok(operation) => instructions.push(Instruction {
-                    operation,
-                    location,
-                    text: code.to_string(),
-                }),
-                Err(diagnostic) => diagnostics.push(diagnostic),
-            }
+    let mut instructions = Vec::with_capacity(raw_instructions.len());
+    for raw in raw_instructions {
+        match parse_instruction(
+            &raw.text,
+            raw.location.clone(),
+            &labels,
+            &data_symbols,
+            &constants,
+        ) {
+            Ok(operation) => instructions.push(Instruction {
+                operation,
+                location: raw.location,
+                text: raw.text,
+            }),
+            Err(diagnostic) => diagnostics.push(diagnostic),
         }
     }
 
@@ -119,11 +171,132 @@ pub fn compile(modules: Vec<SourceModule>) -> Result<Program, Vec<Diagnostic>> {
             modules,
             instructions,
             labels,
+            data_symbols,
+            data_symbol_widths,
+            constants,
+            initial_data,
             entry,
         })
     } else {
         Err(diagnostics)
     }
+}
+
+fn directive_element_width(code: &str) -> Option<usize> {
+    match code.split_whitespace().next()? {
+        ".byte" | ".ascii" | ".asciz" => Some(1),
+        ".word" => Some(2),
+        ".long" => Some(4),
+        ".quad" => Some(8),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn define_label(
+    label: &str,
+    section: Option<Section>,
+    instruction_index: usize,
+    data_offset: usize,
+    location: &SourceLocation,
+    labels: &mut BTreeMap<String, usize>,
+    data_symbols: &mut BTreeMap<String, u64>,
+    constants: &BTreeMap<String, u64>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if labels.contains_key(label)
+        || data_symbols.contains_key(label)
+        || constants.contains_key(label)
+    {
+        diagnostics.push(
+            Diagnostic::error(
+                "E102",
+                format!("symbol `{label}` is defined more than once"),
+                Some(location.clone()),
+            )
+            .with_help("rename one label or remove the duplicate definition"),
+        );
+        return;
+    }
+
+    match section {
+        Some(Section::Text) => {
+            labels.insert(label.to_string(), instruction_index);
+        }
+        Some(Section::Data) => {
+            data_symbols.insert(label.to_string(), DATA_BASE + data_offset as u64);
+        }
+        _ => diagnostics.push(
+            Diagnostic::error(
+                "E103",
+                format!("symbol `{label}` is defined outside a supported section"),
+                Some(location.clone()),
+            )
+            .with_help("place code labels in .text and data labels in .data"),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn define_equate(
+    name: &str,
+    expression: &str,
+    section: Option<Section>,
+    data_offset: usize,
+    location: &SourceLocation,
+    labels: &BTreeMap<String, usize>,
+    data_symbols: &BTreeMap<String, u64>,
+    constants: &mut BTreeMap<String, u64>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if labels.contains_key(name) || data_symbols.contains_key(name) || constants.contains_key(name)
+    {
+        diagnostics.push(Diagnostic::error(
+            "E102",
+            format!("symbol `{name}` is defined more than once"),
+            Some(location.clone()),
+        ));
+        return;
+    }
+
+    let current = (section == Some(Section::Data)).then_some(DATA_BASE + data_offset as u64);
+    match parse_equate_expression(expression, current, data_symbols, constants) {
+        Ok(value) => {
+            constants.insert(name.to_string(), value);
+        }
+        Err(message) => diagnostics.push(
+            Diagnostic::error("E140", message, Some(location.clone()))
+                .with_help("the current slice supports integers, symbols, and `. - symbol`"),
+        ),
+    }
+}
+
+fn take_equate(code: &str) -> Option<(&str, &str)> {
+    let (name, expression) = code.split_once('=')?;
+    let name = name.trim();
+    valid_label(name).then_some((name, expression.trim()))
+}
+
+fn parse_equate_expression(
+    expression: &str,
+    current: Option<u64>,
+    data_symbols: &BTreeMap<String, u64>,
+    constants: &BTreeMap<String, u64>,
+) -> Result<u64, String> {
+    if let Some((left, right)) = expression.split_once('-') {
+        let left = left.trim();
+        let right = right.trim();
+        let left_value = if left == "." {
+            current.ok_or_else(|| "`.` is only available while laying out .data".to_string())?
+        } else {
+            resolve_value(left, data_symbols, constants)?
+        };
+        let right_value = resolve_value(right, data_symbols, constants)?;
+        return left_value
+            .checked_sub(right_value)
+            .ok_or_else(|| format!("equate expression `{expression}` is negative"));
+    }
+    resolve_value(expression.trim(), data_symbols, constants)
 }
 
 fn take_label(code: &str) -> Option<(&str, &str)> {
@@ -146,30 +319,63 @@ fn valid_label(label: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '.'))
 }
 
+fn strip_comment(line: &str) -> &str {
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '#' if !in_string => return &line[..index],
+            _ => {}
+        }
+    }
+    line
+}
+
 fn parse_directive(
     code: &str,
     section: &mut Option<Section>,
+    data: &mut Vec<u8>,
     location: &SourceLocation,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let mut parts = code.split_whitespace();
-    let directive = parts.next().unwrap_or_default();
+    let (directive, arguments) = code
+        .split_once(char::is_whitespace)
+        .map(|(directive, arguments)| (directive, arguments.trim()))
+        .unwrap_or((code, ""));
     match directive {
         ".text" => *section = Some(Section::Text),
-        ".section" => match parts.next() {
+        ".data" => *section = Some(Section::Data),
+        ".section" => match arguments.split_whitespace().next() {
             Some(".text") => *section = Some(Section::Text),
-            Some(_) => *section = Some(Section::Other),
+            Some(".data") => *section = Some(Section::Data),
+            Some(name) => {
+                *section = Some(Section::Other);
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E133",
+                        format!("section `{name}` is not in the Lecture 4 slice yet"),
+                        Some(location.clone()),
+                    )
+                    .with_help("currently supported sections are .text and .data"),
+                );
+            }
             None => diagnostics.push(
                 Diagnostic::error(
                     "E130",
                     "`.section` needs a section name",
                     Some(location.clone()),
                 )
-                .with_help("for code, write `.section .text`"),
+                .with_help("write `.section .text` or `.section .data`"),
             ),
         },
         ".global" | ".globl" => {
-            if parts.next().is_none() {
+            if arguments.is_empty() {
                 diagnostics.push(Diagnostic::error(
                     "E131",
                     format!("`{directive}` needs a symbol name"),
@@ -177,18 +383,119 @@ fn parse_directive(
                 ));
             }
         }
+        ".byte" => parse_integer_data(arguments, 1, *section, data, location, diagnostics),
+        ".word" => parse_integer_data(arguments, 2, *section, data, location, diagnostics),
+        ".long" => parse_integer_data(arguments, 4, *section, data, location, diagnostics),
+        ".quad" => parse_integer_data(arguments, 8, *section, data, location, diagnostics),
+        ".ascii" | ".asciz" => {
+            if *section != Some(Section::Data) {
+                diagnostics.push(Diagnostic::error(
+                    "E134",
+                    format!("`{directive}` appears outside .data"),
+                    Some(location.clone()),
+                ));
+                return;
+            }
+            match parse_string_literal(arguments) {
+                Ok(mut bytes) => {
+                    data.append(&mut bytes);
+                    if directive == ".asciz" {
+                        data.push(0);
+                    }
+                }
+                Err(message) => diagnostics.push(Diagnostic::error(
+                    "E142",
+                    message,
+                    Some(location.clone()),
+                )),
+            }
+        }
         _ => diagnostics.push(
             Diagnostic::error(
                 "E132",
-                format!("directive `{directive}` is not in the Lecture 3 slice yet"),
+                format!("directive `{directive}` is not in the Lecture 4 slice yet"),
                 Some(location.clone()),
             )
-            .with_help("the current slice supports .text/.section .text and .global/.globl"),
+            .with_help(
+                "supported directives are .text/.data/.section, .global/.globl, integer data, and .ascii/.asciz",
+            ),
         ),
     }
 }
 
-fn parse_instruction(code: &str, location: SourceLocation) -> Result<Operation, Diagnostic> {
+fn parse_integer_data(
+    arguments: &str,
+    width: usize,
+    section: Option<Section>,
+    data: &mut Vec<u8>,
+    location: &SourceLocation,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if section != Some(Section::Data) {
+        diagnostics.push(Diagnostic::error(
+            "E134",
+            "initialized data directive appears outside .data",
+            Some(location.clone()),
+        ));
+        return;
+    }
+    if arguments.is_empty() {
+        diagnostics.push(Diagnostic::error(
+            "E141",
+            "data directive needs at least one value",
+            Some(location.clone()),
+        ));
+        return;
+    }
+    for argument in arguments.split(',') {
+        match parse_immediate(argument.trim()) {
+            Ok(value) => data.extend_from_slice(&value.to_le_bytes()[..width]),
+            Err(message) => {
+                diagnostics.push(Diagnostic::error("E141", message, Some(location.clone())))
+            }
+        }
+    }
+}
+
+fn parse_string_literal(text: &str) -> Result<Vec<u8>, String> {
+    let text = text.trim();
+    let Some(inner) = text
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return Err("string data must be enclosed in double quotes".to_string());
+    };
+    let mut bytes = Vec::new();
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            let mut encoded = [0; 4];
+            bytes.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+            continue;
+        }
+        let escaped = characters
+            .next()
+            .ok_or_else(|| "string ends with an incomplete escape".to_string())?;
+        match escaped {
+            'n' => bytes.push(b'\n'),
+            'r' => bytes.push(b'\r'),
+            't' => bytes.push(b'\t'),
+            '0' => bytes.push(0),
+            '\\' => bytes.push(b'\\'),
+            '"' => bytes.push(b'"'),
+            other => return Err(format!("unsupported string escape `\\{other}`")),
+        }
+    }
+    Ok(bytes)
+}
+
+fn parse_instruction(
+    code: &str,
+    location: SourceLocation,
+    labels: &BTreeMap<String, usize>,
+    data_symbols: &BTreeMap<String, u64>,
+    constants: &BTreeMap<String, u64>,
+) -> Result<Operation, Diagnostic> {
     let (mnemonic, operands) = code
         .split_once(char::is_whitespace)
         .map(|(mnemonic, operands)| (mnemonic, operands.trim()))
@@ -205,46 +512,101 @@ fn parse_instruction(code: &str, location: SourceLocation) -> Result<Operation, 
         ));
     }
 
+    if let Some(condition) = parse_jump(&mnemonic) {
+        if operands.is_empty() || operands.contains(',') {
+            return Err(Diagnostic::error(
+                "E218",
+                format!("`{mnemonic}` needs exactly one label operand"),
+                Some(location),
+            ));
+        }
+        let target = labels.get(operands).copied().ok_or_else(|| {
+            Diagnostic::error(
+                "E219",
+                format!("jump target `{operands}` is not a .text label"),
+                Some(location.clone()),
+            )
+            .with_help("define the target with `label:` in the .text section")
+        })?;
+        return Ok(Operation::Jump {
+            condition,
+            target,
+            target_label: operands.to_string(),
+        });
+    }
+
     let (family, explicit_width) = parse_family(&mnemonic).ok_or_else(|| {
         Diagnostic::error(
             "E202",
-            format!("instruction `{mnemonic}` is not in the Lecture 3 slice yet"),
+            format!("instruction `{mnemonic}` is not in the Lecture 4 slice yet"),
             Some(location.clone()),
         )
-        .with_help("currently supported instruction families are mov, add, sub, and syscall")
+        .with_help(
+            "currently supported families are mov, lea, add, sub, xor, cmp, jumps, and syscall",
+        )
     })?;
 
-    let Some((source_text, destination_text)) = operands.split_once(',') else {
-        return Err(Diagnostic::error(
+    let (source_text, destination_text) = split_operands(operands).map_err(|message| {
+        Diagnostic::error(
             "E203",
-            format!("`{mnemonic}` needs source and destination operands separated by a comma"),
-            Some(location),
+            format!("`{mnemonic}` {message}"),
+            Some(location.clone()),
         )
-        .with_help("AT&T syntax is `instruction source,destination`"));
-    };
-    if destination_text.contains(',') {
+        .with_help("AT&T syntax is `instruction source,destination`")
+    })?;
+    let source = parse_operand(source_text, data_symbols, constants, &location, false)?;
+    let destination = parse_operand(destination_text, data_symbols, constants, &location, true)?;
+
+    if family == Family::Lea {
+        let Operand::Memory(source) = source else {
+            return Err(Diagnostic::error(
+                "E220",
+                "`lea` needs an address expression as its source",
+                Some(location),
+            )
+            .with_help("for example: `lea num(%rip),%rbx`"));
+        };
+        let Operand::Register(destination) = destination else {
+            return Err(Diagnostic::error(
+                "E221",
+                "`lea` destination must be a register",
+                Some(location),
+            ));
+        };
+        let width = explicit_width.unwrap_or(destination.width());
+        ensure_register_width(destination, width, &mnemonic, &location)?;
+        return Ok(Operation::Lea {
+            source,
+            destination,
+            width,
+        });
+    }
+
+    if matches!(destination, Operand::Immediate(_)) {
         return Err(Diagnostic::error(
-            "E204",
-            format!("`{mnemonic}` takes exactly two operands"),
+            "E215",
+            "destination cannot be an immediate value",
             Some(location),
         ));
     }
-
-    let destination = parse_register(destination_text.trim(), &location, true)?;
-    let width = explicit_width.unwrap_or(destination.width());
-    if destination.width() != width {
+    let width = infer_width(explicit_width, &source, &destination).ok_or_else(|| {
+        Diagnostic::error(
+            "E206",
+            format!("cannot infer the width of `{mnemonic}` from two non-register operands"),
+            Some(location.clone()),
+        )
+        .with_help("add b/w/l/q to the mnemonic, such as `addq $10,(%rbx)`")
+    })?;
+    validate_operand_width(&source, width, &mnemonic, &location)?;
+    validate_operand_width(&destination, width, &mnemonic, &location)?;
+    if matches!(source, Operand::Memory(_)) && matches!(destination, Operand::Memory(_)) {
         return Err(Diagnostic::error(
-            "E205",
-            format!(
-                "`{mnemonic}` is {width}-bit, but %{} is {}-bit",
-                destination.name(),
-                destination.width()
-            ),
+            "E217",
+            "x86 does not allow two explicit memory operands here",
             Some(location),
         )
-        .with_help("use a register name whose width matches the instruction suffix"));
+        .with_help("move one value through a register first"));
     }
-    let source = parse_operand(source_text.trim(), width, &location)?;
 
     Ok(match family {
         Family::Mov => Operation::Mov {
@@ -262,14 +624,28 @@ fn parse_instruction(code: &str, location: SourceLocation) -> Result<Operation, 
             destination,
             width,
         },
+        Family::Cmp => Operation::Cmp {
+            source,
+            destination,
+            width,
+        },
+        Family::Xor => Operation::Xor {
+            source,
+            destination,
+            width,
+        },
+        Family::Lea => unreachable!("handled above"),
     })
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Family {
     Mov,
     Add,
     Sub,
+    Lea,
+    Cmp,
+    Xor,
 }
 
 fn parse_family(mnemonic: &str) -> Option<(Family, Option<u8>)> {
@@ -277,6 +653,9 @@ fn parse_family(mnemonic: &str) -> Option<(Family, Option<u8>)> {
         ("mov", Family::Mov),
         ("add", Family::Add),
         ("sub", Family::Sub),
+        ("lea", Family::Lea),
+        ("cmp", Family::Cmp),
+        ("xor", Family::Xor),
     ] {
         if mnemonic == name {
             return Some((family, None));
@@ -290,27 +669,73 @@ fn parse_family(mnemonic: &str) -> Option<(Family, Option<u8>)> {
     None
 }
 
-fn parse_operand(text: &str, width: u8, location: &SourceLocation) -> Result<Operand, Diagnostic> {
+fn parse_jump(mnemonic: &str) -> Option<JumpCondition> {
+    Some(match mnemonic {
+        "jmp" => JumpCondition::Always,
+        "je" => JumpCondition::Equal,
+        "jne" => JumpCondition::NotEqual,
+        "jl" => JumpCondition::Less,
+        "jle" => JumpCondition::LessOrEqual,
+        "jg" => JumpCondition::Greater,
+        "jge" => JumpCondition::GreaterOrEqual,
+        "jb" => JumpCondition::Below,
+        "jbe" => JumpCondition::BelowOrEqual,
+        "ja" => JumpCondition::Above,
+        "jae" => JumpCondition::AboveOrEqual,
+        _ => return None,
+    })
+}
+
+fn split_operands(text: &str) -> Result<(&str, &str), &'static str> {
+    let mut depth = 0_u8;
+    let mut separator = None;
+    for (index, character) in text.char_indices() {
+        match character {
+            '(' => depth = depth.saturating_add(1),
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                if separator.is_some() {
+                    return Err("takes exactly two operands");
+                }
+                separator = Some(index);
+            }
+            _ => {}
+        }
+    }
+    let Some(index) = separator else {
+        return Err("needs source and destination operands separated by a comma");
+    };
+    let source = text[..index].trim();
+    let destination = text[index + 1..].trim();
+    if source.is_empty() || destination.is_empty() {
+        return Err("needs both a source and a destination operand");
+    }
+    Ok((source, destination))
+}
+
+fn parse_operand(
+    text: &str,
+    data_symbols: &BTreeMap<String, u64>,
+    constants: &BTreeMap<String, u64>,
+    location: &SourceLocation,
+    destination: bool,
+) -> Result<Operand, Diagnostic> {
+    let text = text.trim();
     if let Some(immediate) = text.strip_prefix('$') {
-        return parse_immediate(immediate)
-            .map(|value| Operand::Immediate(value & mask(width)))
+        return resolve_value(immediate.trim(), data_symbols, constants)
+            .map(Operand::Immediate)
             .map_err(|message| Diagnostic::error("E210", message, Some(location.clone())));
     }
     if text.starts_with('%') {
-        let register = parse_register(text, location, false)?;
-        if register.width() != width {
-            return Err(Diagnostic::error(
-                "E211",
-                format!(
-                    "source %{} is {}-bit, but the destination is {width}-bit",
-                    register.name(),
-                    register.width()
-                ),
-                Some(location.clone()),
-            )
-            .with_help("use matching register widths on both sides"));
-        }
-        return Ok(Operand::Register(register));
+        return parse_register(text, location, destination).map(Operand::Register);
+    }
+    if RegisterRef::parse(text).is_some() {
+        return Err(Diagnostic::error(
+            "E214",
+            format!("register `{text}` is missing `%`"),
+            Some(location.clone()),
+        )
+        .with_help(format!("write `%{text}` for a register")));
     }
     if parse_immediate(text).is_ok() {
         return Err(Diagnostic::error(
@@ -320,11 +745,132 @@ fn parse_operand(text: &str, width: u8, location: &SourceLocation) -> Result<Ope
         )
         .with_help(format!("write `${text}` for an immediate value")));
     }
-    Err(Diagnostic::error(
-        "E213",
-        format!("unsupported operand `{text}`"),
-        Some(location.clone()),
-    ))
+    parse_memory(text, data_symbols, location).map(Operand::Memory)
+}
+
+fn parse_memory(
+    text: &str,
+    data_symbols: &BTreeMap<String, u64>,
+    location: &SourceLocation,
+) -> Result<MemoryAddress, Diagnostic> {
+    let (displacement_text, components) = if let Some(open) = text.find('(') {
+        if !text.ends_with(')') {
+            return Err(address_error(
+                "memory operand has an unmatched parenthesis",
+                location,
+            ));
+        }
+        (&text[..open], Some(&text[open + 1..text.len() - 1]))
+    } else {
+        (text, None)
+    };
+
+    let (symbol, symbol_address, displacement) = if displacement_text.trim().is_empty() {
+        (None, None, 0)
+    } else if let Ok(value) = parse_displacement(displacement_text.trim()) {
+        (None, None, value)
+    } else {
+        let name = displacement_text.trim();
+        let Some(address) = data_symbols.get(name).copied() else {
+            return Err(
+                address_error(format!("unknown data symbol `{name}`"), location)
+                    .with_help("define the symbol with a label in .data"),
+            );
+        };
+        (Some(name.to_string()), Some(address), 0)
+    };
+
+    let mut base = None;
+    let mut index = None;
+    let mut scale = 1;
+    let mut rip_relative = false;
+    if let Some(components) = components {
+        let parts = components.split(',').map(str::trim).collect::<Vec<_>>();
+        if parts.len() > 3 {
+            return Err(address_error(
+                "addressing mode has more than base, index, and scale",
+                location,
+            ));
+        }
+        if let Some(base_text) = parts.first().filter(|part| !part.is_empty()) {
+            if *base_text == "%rip" {
+                rip_relative = true;
+            } else {
+                base = Some(parse_address_register(base_text, location)?);
+            }
+        }
+        if let Some(index_text) = parts.get(1).filter(|part| !part.is_empty()) {
+            if *index_text == "%rip" {
+                return Err(address_error("%rip cannot be an index register", location));
+            }
+            index = Some(parse_address_register(index_text, location)?);
+        }
+        if let Some(scale_text) = parts.get(2).filter(|part| !part.is_empty()) {
+            scale = scale_text
+                .parse::<u8>()
+                .map_err(|_| address_error(format!("invalid scale `{scale_text}`"), location))?;
+            if !matches!(scale, 1 | 2 | 4 | 8) {
+                return Err(address_error("scale must be 1, 2, 4, or 8", location));
+            }
+            if index.is_none() {
+                return Err(address_error(
+                    "a scale requires an index register",
+                    location,
+                ));
+            }
+        }
+    } else if symbol.is_none() {
+        return Err(address_error(
+            format!("unsupported operand `{text}`"),
+            location,
+        ));
+    }
+
+    if rip_relative && symbol.is_none() {
+        return Err(address_error(
+            "this slice requires a symbol in RIP-relative addressing",
+            location,
+        )
+        .with_help("for example: `num(%rip)`"));
+    }
+
+    Ok(MemoryAddress {
+        text: text.to_string(),
+        symbol,
+        symbol_address,
+        displacement,
+        base,
+        index,
+        scale,
+        rip_relative,
+    })
+}
+
+fn parse_address_register(
+    text: &str,
+    location: &SourceLocation,
+) -> Result<RegisterRef, Diagnostic> {
+    let register = parse_register(text, location, false)?;
+    if register.width() != 64 {
+        return Err(address_error(
+            format!("address register %{} must be 64-bit", register.name()),
+            location,
+        ));
+    }
+    Ok(register)
+}
+
+fn address_error(message: impl Into<String>, location: &SourceLocation) -> Diagnostic {
+    Diagnostic::error("E223", message, Some(location.clone()))
+}
+
+fn parse_displacement(text: &str) -> Result<i64, String> {
+    if let Some(hex) = text.strip_prefix("0x") {
+        return i64::from_str_radix(hex, 16)
+            .map_err(|_| format!("invalid address displacement `{text}`"));
+    }
+    text.parse::<i64>()
+        .map_err(|_| format!("invalid address displacement `{text}`"))
 }
 
 fn parse_register(
@@ -333,18 +879,10 @@ fn parse_register(
     destination: bool,
 ) -> Result<RegisterRef, Diagnostic> {
     let Some(name) = text.strip_prefix('%') else {
-        if RegisterRef::parse(text).is_some() {
-            return Err(Diagnostic::error(
-                "E214",
-                format!("register `{text}` is missing `%`"),
-                Some(location.clone()),
-            )
-            .with_help(format!("write `%{text}` for a register")));
-        }
         let role = if destination { "destination" } else { "source" };
         return Err(Diagnostic::error(
             "E215",
-            format!("{role} `{text}` is not a register in this slice"),
+            format!("{role} `{text}` is not a register"),
             Some(location.clone()),
         ));
     };
@@ -357,6 +895,69 @@ fn parse_register(
     })
 }
 
+fn infer_width(explicit: Option<u8>, source: &Operand, destination: &Operand) -> Option<u8> {
+    explicit.or_else(|| {
+        operand_register(destination)
+            .or_else(|| operand_register(source))
+            .map(RegisterRef::width)
+    })
+}
+
+fn operand_register(operand: &Operand) -> Option<RegisterRef> {
+    match operand {
+        Operand::Register(register) => Some(*register),
+        Operand::Immediate(_) | Operand::Memory(_) => None,
+    }
+}
+
+fn validate_operand_width(
+    operand: &Operand,
+    width: u8,
+    mnemonic: &str,
+    location: &SourceLocation,
+) -> Result<(), Diagnostic> {
+    if let Operand::Register(register) = operand {
+        ensure_register_width(*register, width, mnemonic, location)?;
+    }
+    Ok(())
+}
+
+fn ensure_register_width(
+    register: RegisterRef,
+    width: u8,
+    mnemonic: &str,
+    location: &SourceLocation,
+) -> Result<(), Diagnostic> {
+    if register.width() == width {
+        return Ok(());
+    }
+    Err(Diagnostic::error(
+        "E205",
+        format!(
+            "`{mnemonic}` is {width}-bit, but %{} is {}-bit",
+            register.name(),
+            register.width()
+        ),
+        Some(location.clone()),
+    )
+    .with_help("use register names whose widths match the instruction suffix"))
+}
+
+fn resolve_value(
+    text: &str,
+    data_symbols: &BTreeMap<String, u64>,
+    constants: &BTreeMap<String, u64>,
+) -> Result<u64, String> {
+    if let Ok(value) = parse_immediate(text) {
+        return Ok(value);
+    }
+    constants
+        .get(text)
+        .or_else(|| data_symbols.get(text))
+        .copied()
+        .ok_or_else(|| format!("unknown immediate symbol `{text}`"))
+}
+
 fn parse_immediate(text: &str) -> Result<u64, String> {
     let text = text.trim();
     if text.len() >= 3 && text.starts_with('\'') && text.ends_with('\'') {
@@ -365,7 +966,7 @@ fn parse_immediate(text: &str) -> Result<u64, String> {
             "\\n" => b'\n',
             "\\t" => b'\t',
             "\\0" => 0,
-            _ if inner.chars().count() == 1 => inner.as_bytes()[0],
+            _ if inner.is_ascii() && inner.len() == 1 => inner.as_bytes()[0],
             _ => return Err(format!("invalid character immediate `{text}`")),
         };
         return Ok(value as u64);
@@ -392,16 +993,6 @@ fn parse_immediate(text: &str) -> Result<u64, String> {
     }
 }
 
-fn mask(width: u8) -> u64 {
-    match width {
-        64 => u64::MAX,
-        32 => u32::MAX as u64,
-        16 => u16::MAX as u64,
-        8 => u8::MAX as u64,
-        _ => unreachable!(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,6 +1012,36 @@ mod tests {
     }
 
     #[test]
+    fn lays_out_little_endian_data_and_equates() {
+        let program = compile(module(
+            ".data\nnum: .long 50,100\nmsg: .asciz \"A\\n\"\nlen = . - msg\n.text\n.global _start\n_start:\n mov $len,%rdi\n mov $60,%rax\n syscall\n",
+        ))
+        .unwrap();
+        assert_eq!(&program.initial_data[..8], &[50, 0, 0, 0, 100, 0, 0, 0]);
+        assert_eq!(&program.initial_data[8..], &[b'A', b'\n', 0]);
+        assert_eq!(program.constants["len"], 3);
+        assert_eq!(program.data_symbols["num"], DATA_BASE);
+    }
+
+    #[test]
+    fn parses_scaled_and_rip_relative_addresses() {
+        let program = compile(module(
+            ".data\nnum: .quad 1,2\n.text\n.global _start\n_start:\n lea num(%rip),%rbx\n mov $1,%rcx\n movq (%rbx,%rcx,8),%rdi\n mov $60,%rax\n syscall\n",
+        ))
+        .unwrap();
+        assert_eq!(program.instructions.len(), 5);
+    }
+
+    #[test]
+    fn resolves_forward_jump_labels() {
+        let program = compile(module(
+            ".text\n.global _start\n_start:\n cmp $0,%rax\n jge done\n mov $1,%rdi\ndone:\n mov $60,%rax\n syscall\n",
+        ))
+        .unwrap();
+        assert_eq!(program.labels["done"], 3);
+    }
+
+    #[test]
     fn explains_a_missing_immediate_marker() {
         let diagnostics = compile(module(
             ".section .text\n.global _start\n_start:\n mov 60,%rax\n syscall\n",
@@ -437,5 +1058,32 @@ mod tests {
         ))
         .unwrap_err();
         assert_eq!(diagnostics[0].code, "E205");
+    }
+
+    #[test]
+    fn diagnoses_invalid_scales_and_ambiguous_memory_widths() {
+        let diagnostics = compile(module(
+            ".data\nnum: .quad 1\n.text\n.global _start\n_start:\n movq (%rbx,%rcx,3),%rax\n add $1,num(%rip)\n",
+        ))
+        .unwrap_err();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E223")
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "E206")
+        );
+    }
+
+    #[test]
+    fn rejects_two_explicit_memory_operands() {
+        let diagnostics = compile(module(
+            ".data\nleft: .quad 1\nright: .quad 2\n.text\n.global _start\n_start:\n movq left(%rip),right(%rip)\n",
+        ))
+        .unwrap_err();
+        assert_eq!(diagnostics[0].code, "E217");
     }
 }

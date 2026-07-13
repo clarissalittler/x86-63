@@ -54,6 +54,10 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> 
         {
             let command = match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                KeyCode::Char('m') => {
+                    app.detail = app.detail.toggle();
+                    None
+                }
                 KeyCode::Char('s') | KeyCode::Right | KeyCode::Enter => Some(Command::Step),
                 KeyCode::Char('n') => Some(Command::Next),
                 KeyCode::Char('b') | KeyCode::Left => Some(Command::Back),
@@ -62,7 +66,19 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> 
                 _ => None,
             };
             if let Some(command) = command {
-                app.last = Some(app.session.execute(command));
+                let result = app.session.execute(command);
+                if result.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        StepEvent::EffectiveAddress { .. }
+                            | StepEvent::MemoryRead { .. }
+                            | StepEvent::MemoryWrite { .. }
+                            | StepEvent::Output { .. }
+                    )
+                }) {
+                    app.detail = DetailPane::Memory;
+                }
+                app.last = Some(result);
             }
         }
     }
@@ -72,6 +88,7 @@ struct App {
     session: Session,
     program: ProgramView,
     last: Option<CommandResult>,
+    detail: DetailPane,
 }
 
 impl App {
@@ -81,6 +98,7 @@ impl App {
             session,
             program,
             last: None,
+            detail: DetailPane::Registers,
         }
     }
 
@@ -108,6 +126,33 @@ impl App {
             })
             .collect()
     }
+
+    fn changed_memory(&self) -> BTreeSet<String> {
+        self.last
+            .as_ref()
+            .into_iter()
+            .flat_map(|result| &result.events)
+            .filter_map(|event| match event {
+                StepEvent::MemoryWrite { address, .. } => Some(address.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DetailPane {
+    Registers,
+    Memory,
+}
+
+impl DetailPane {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Registers => Self::Memory,
+            Self::Memory => Self::Registers,
+        }
+    }
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
@@ -121,9 +166,10 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
         .split(outer[0]);
     draw_source(frame, columns[0], app);
     draw_machine(frame, columns[1], app);
-    let help = Paragraph::new(" s/Enter step   n next   b/← back   c run   r reset   q quit ")
-        .style(Style::default().fg(Color::Black).bg(Color::Cyan))
-        .block(Block::default().borders(Borders::ALL).title(" Keys "));
+    let help =
+        Paragraph::new(" s/Enter step  n next  b/← back  c run  r reset  m regs/mem  q quit ")
+            .style(Style::default().fg(Color::Black).bg(Color::Cyan))
+            .block(Block::default().borders(Borders::ALL).title(" Keys "));
     frame.render_widget(help, outer[1]);
 }
 
@@ -178,33 +224,10 @@ fn draw_machine(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         ])
         .split(area);
     let view = app.view();
-    let changed = app.changed_registers();
-    // The lecture-3 programs use the original eight general-purpose registers.
-    // One register per row remains legible in the 80-column terminals students
-    // commonly use over SSH; later slices can add a toggle for r8-r15.
-    let register_lines = view
-        .registers
-        .iter()
-        .take(8)
-        .map(|register| {
-            let style = if changed.contains(&register.name) {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            Line::from(Span::styled(
-                format!(" {:>3}  {}", register.name, register.hex),
-                style,
-            ))
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(register_lines)
-            .block(Block::default().borders(Borders::ALL).title(" Registers ")),
-        rows[0],
-    );
+    match app.detail {
+        DetailPane::Registers => draw_registers(frame, rows[0], app, &view),
+        DetailPane::Memory => draw_memory(frame, rows[0], app, &view),
+    }
 
     let status = match &view.status {
         MachineStatus::Paused => "paused".to_string(),
@@ -247,4 +270,145 @@ fn draw_machine(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             .wrap(Wrap { trim: true }),
         rows[2],
     );
+}
+
+fn draw_registers(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, view: &MachineView) {
+    let changed = app.changed_registers();
+    // One register per row remains legible in the 80-column terminals students
+    // commonly use over SSH. `m` swaps this pane with memory and process output.
+    let register_lines = view
+        .registers
+        .iter()
+        .take(8)
+        .map(|register| {
+            let style = if changed.contains(&register.name) {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(
+                format!(" {:>3}  {}", register.name, register.hex),
+                style,
+            ))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(register_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Registers (m) "),
+        ),
+        area,
+    );
+}
+
+fn draw_memory(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, view: &MachineView) {
+    let changed = app.changed_memory();
+    let mut lines = Vec::new();
+    for symbol in &view.memory.symbols {
+        let count = symbol.size.div_ceil(symbol.element_width);
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {}", symbol.name),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                " {} × {count}",
+                directive_name(symbol.element_width)
+            )),
+        ]));
+        let bytes = &view.memory.bytes[symbol.offset..symbol.offset + symbol.size];
+        let address = parse_hex(&symbol.address);
+        if symbol.element_width == 1 && symbol.size > 8 {
+            for (index, row) in bytes.chunks(8).enumerate() {
+                lines.push(Line::from(format!(
+                    " +{:02x}  {}",
+                    index * 8,
+                    format_bytes(row)
+                )));
+            }
+        } else {
+            for (index, element) in bytes.chunks(symbol.element_width).enumerate() {
+                let element_address = address + (index * symbol.element_width) as u64;
+                let address_text = format!("0x{element_address:016x}");
+                let style = if changed.contains(&address_text) {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::styled(
+                    format!(" [{index}] signed {}", little_signed(element)),
+                    style,
+                ));
+                lines.push(Line::styled(
+                    format!("      {}", format_bytes(element)),
+                    style,
+                ));
+            }
+        }
+    }
+    if !view.io.stdout_bytes.is_empty() {
+        lines.push(Line::styled(
+            format!(" stdout: `{}`", view.io.stdout_escaped),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    if !view.io.stderr_bytes.is_empty() {
+        lines.push(Line::styled(
+            format!(" stderr: `{}`", view.io.stderr_escaped),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(" No .data or process output yet."));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Memory / output (m) "),
+        ),
+        area,
+    );
+}
+
+fn directive_name(width: usize) -> &'static str {
+    match width {
+        1 => ".byte",
+        2 => ".word",
+        4 => ".long",
+        8 => ".quad",
+        _ => "data",
+    }
+}
+
+fn format_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn little_signed(bytes: &[u8]) -> i128 {
+    let value = bytes
+        .iter()
+        .enumerate()
+        .fold(0_u128, |value, (index, byte)| {
+            value | (u128::from(*byte) << (index * 8))
+        });
+    let bits = bytes.len() * 8;
+    if bits > 0 && value & (1_u128 << (bits - 1)) != 0 {
+        value as i128 - (1_i128 << bits)
+    } else {
+        value as i128
+    }
+}
+
+fn parse_hex(value: &str) -> u64 {
+    u64::from_str_radix(value.trim_start_matches("0x"), 16).unwrap_or(0)
 }

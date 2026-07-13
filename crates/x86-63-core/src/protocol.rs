@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{Diagnostic, Flags, MachineStatus, SourceLocation};
+use crate::{Diagnostic, Flags, MachineStatus, SourceLocation, SymbolView};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+// Version 2 adds data memory, process I/O, effective-address receipts, and
+// branch/output events to every machine view and command result.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
@@ -31,7 +33,24 @@ pub struct MachineView {
     pub next_text: Option<String>,
     pub registers: Vec<RegisterView>,
     pub flags: FlagsView,
+    pub memory: MemoryView,
+    pub io: IoView,
     pub history_depth: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryView {
+    pub base: String,
+    pub bytes: Vec<u8>,
+    pub symbols: Vec<SymbolView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IoView {
+    pub stdout_bytes: Vec<u8>,
+    pub stdout_escaped: String,
+    pub stderr_bytes: Vec<u8>,
+    pub stderr_escaped: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,6 +103,24 @@ pub enum StepEvent {
         after: String,
         width: u8,
     },
+    EffectiveAddress {
+        expression: String,
+        address: String,
+        symbol: Option<String>,
+    },
+    MemoryRead {
+        address: String,
+        value: String,
+        width: usize,
+        symbol: Option<String>,
+    },
+    MemoryWrite {
+        address: String,
+        before: String,
+        after: String,
+        width: usize,
+        symbol: Option<String>,
+    },
     Arithmetic {
         operation: String,
         left: String,
@@ -95,6 +132,18 @@ pub enum StepEvent {
         before: FlagsView,
         after: FlagsView,
     },
+    Compare {
+        destination: String,
+        source: String,
+        result: String,
+        width: u8,
+    },
+    Branch {
+        condition: String,
+        predicate: String,
+        target: String,
+        taken: bool,
+    },
     Syscall {
         number: String,
         name: Option<String>,
@@ -103,6 +152,11 @@ pub enum StepEvent {
         raw_hex: String,
         signed: String,
         shell_status: u8,
+    },
+    Output {
+        fd: u64,
+        bytes: Vec<u8>,
+        escaped: String,
     },
     Fault {
         code: String,
@@ -116,4 +170,20 @@ pub enum StepEvent {
 
 pub(crate) fn hex64(value: u64) -> String {
     format!("0x{value:016x}")
+}
+
+pub(crate) fn escaped_bytes(bytes: &[u8]) -> String {
+    let mut escaped = String::new();
+    for &byte in bytes {
+        match byte {
+            b'\n' => escaped.push_str("\\n"),
+            b'\r' => escaped.push_str("\\r"),
+            b'\t' => escaped.push_str("\\t"),
+            b'\\' => escaped.push_str("\\\\"),
+            0 => escaped.push_str("\\0"),
+            0x20..=0x7e => escaped.push(char::from(byte)),
+            _ => escaped.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    escaped
 }
