@@ -1,0 +1,14 @@
+{
+  "name": "x86-63-workspace",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "wasm:build": "bash scripts/build-wasm.sh",
+    "wasm:test": "npm run wasm:build && npm --workspace @x86-63/web run test:wasm",
+    "web:dev": "npm run wasm:build && npm --workspace @x86-63/web run dev",
+    "web:build": "npm run wasm:build && npm --workspace @x86-63/web run build",
+    "web:preview": "npm --workspace @x86-63/web run preview"
+  }
+}

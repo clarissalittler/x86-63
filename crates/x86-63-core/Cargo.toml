@@ -1,0 +1,12 @@
+[package]
+name = "x86-63-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+x86-63-course = { path = "../x86-63-course" }
