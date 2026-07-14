@@ -140,6 +140,15 @@ impl Program {
             .get(pc)
             .is_some_and(|instruction| matches!(&instruction.operation, Operation::Call { .. }))
     }
+
+    pub(crate) fn call_target_for_return_address(&self, address: u64) -> Option<&str> {
+        let return_index = self.instruction_index_for_address(address)?;
+        let call_index = return_index.checked_sub(1)?;
+        match &self.instructions.get(call_index)?.operation {
+            Operation::Call { target_label, .. } => Some(target_label),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

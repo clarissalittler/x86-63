@@ -274,6 +274,7 @@ pub(crate) enum JumpCondition {
     BelowOrEqual,
     Above,
     AboveOrEqual,
+    NoOverflow,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -282,6 +283,12 @@ pub(crate) enum Operation {
         source: Operand,
         destination: Operand,
         width: u8,
+    },
+    MovZeroExtend {
+        source: Operand,
+        destination: RegisterRef,
+        source_width: u8,
+        destination_width: u8,
     },
     Add {
         source: Operand,
@@ -308,6 +315,32 @@ pub(crate) enum Operation {
         destination: Operand,
         width: u8,
     },
+    Imul {
+        source: Operand,
+        destination: Operand,
+        width: u8,
+    },
+    Inc {
+        destination: Operand,
+        width: u8,
+    },
+    Dec {
+        destination: Operand,
+        width: u8,
+    },
+    Neg {
+        destination: Operand,
+        width: u8,
+    },
+    Test {
+        source: Operand,
+        destination: Operand,
+        width: u8,
+    },
+    Div {
+        source: Operand,
+        width: u8,
+    },
     Jump {
         condition: JumpCondition,
         target: usize,
@@ -324,6 +357,7 @@ pub(crate) enum Operation {
     Pop {
         destination: Operand,
     },
+    Leave,
     Syscall,
 }
 
@@ -505,6 +539,21 @@ impl Machine {
                     operand_name(destination)
                 ))
             }
+            Operation::MovZeroExtend {
+                source,
+                destination,
+                source_width,
+                destination_width,
+            } => {
+                let value = self.read_operand(source, *source_width, events)?;
+                self.write_register(*destination, value, register_writes, events);
+                Ok(format!(
+                    "movz read {} from {} and zero-extended it from {source_width} to {destination_width} bits in %{}.",
+                    format_width(value, *source_width),
+                    operand_name(source),
+                    destination.name()
+                ))
+            }
             Operation::Add {
                 source,
                 destination,
@@ -562,6 +611,45 @@ impl Machine {
                 memory_writes,
                 events,
             ),
+            Operation::Imul {
+                source,
+                destination,
+                width,
+            } => self.apply_imul(
+                source,
+                destination,
+                *width,
+                register_writes,
+                memory_writes,
+                events,
+            ),
+            Operation::Inc { destination, width } => self.apply_increment_decrement(
+                ArithmeticKind::Add,
+                destination,
+                *width,
+                register_writes,
+                memory_writes,
+                events,
+            ),
+            Operation::Dec { destination, width } => self.apply_increment_decrement(
+                ArithmeticKind::Sub,
+                destination,
+                *width,
+                register_writes,
+                memory_writes,
+                events,
+            ),
+            Operation::Neg { destination, width } => {
+                self.apply_neg(destination, *width, register_writes, memory_writes, events)
+            }
+            Operation::Test {
+                source,
+                destination,
+                width,
+            } => self.apply_test(source, destination, *width, events),
+            Operation::Div { source, width } => {
+                self.apply_div(source, *width, register_writes, events)
+            }
             Operation::Jump {
                 condition,
                 target,
@@ -614,6 +702,7 @@ impl Machine {
                     operand_name(destination)
                 ))
             }
+            Operation::Leave => self.apply_leave(register_writes, memory_writes, events),
             Operation::Syscall => self.apply_syscall(register_writes, memory_writes, events),
         }
     }
@@ -802,6 +891,228 @@ impl Machine {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn apply_imul(
+        &mut self,
+        source: &Operand,
+        destination: &Operand,
+        width: u8,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        memory_writes: &mut Vec<MemoryWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<String, RuntimeFault> {
+        let right = self.read_operand(source, width, events)?;
+        let left = self.read_operand(destination, width, events)?;
+        let product = signed_value(left, width) * signed_value(right, width);
+        let result = product as u64 & width_mask(width);
+        let minimum = -(1_i128 << (width - 1));
+        let maximum = (1_i128 << (width - 1)) - 1;
+        let overflow = !(minimum..=maximum).contains(&product);
+        let old_flags = self.flags;
+        self.flags.cf = overflow;
+        self.flags.of = overflow;
+        self.write_operand(
+            destination,
+            result,
+            width,
+            register_writes,
+            memory_writes,
+            events,
+        )?;
+        events.push(StepEvent::Arithmetic {
+            operation: "imul".to_string(),
+            left: format_width(left, width),
+            right: format_width(right, width),
+            result: format_width(result, width),
+            width,
+        });
+        events.push(StepEvent::FlagsChanged {
+            before: old_flags.into(),
+            after: self.flags.into(),
+        });
+        Ok(format!(
+            "imul multiplied signed {} by signed {} and stored the low {width} bits, {}, in {}. CF and OF are {}.",
+            signed_value(left, width),
+            signed_value(right, width),
+            format_width(result, width),
+            operand_name(destination),
+            if overflow {
+                "set because the product overflowed"
+            } else {
+                "clear"
+            }
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_increment_decrement(
+        &mut self,
+        kind: ArithmeticKind,
+        destination: &Operand,
+        width: u8,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        memory_writes: &mut Vec<MemoryWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<String, RuntimeFault> {
+        let before = self.read_operand(destination, width, events)?;
+        let (result, mut flags) = arithmetic(kind, before, 1, width);
+        let old_flags = self.flags;
+        flags.cf = old_flags.cf;
+        self.write_operand(
+            destination,
+            result,
+            width,
+            register_writes,
+            memory_writes,
+            events,
+        )?;
+        self.flags = flags;
+        let operation = if matches!(kind, ArithmeticKind::Add) {
+            "inc"
+        } else {
+            "dec"
+        };
+        events.push(StepEvent::Arithmetic {
+            operation: operation.to_string(),
+            left: format_width(before, width),
+            right: format_width(1, width),
+            result: format_width(result, width),
+            width,
+        });
+        events.push(StepEvent::FlagsChanged {
+            before: old_flags.into(),
+            after: flags.into(),
+        });
+        Ok(format!(
+            "{operation} changed {} from {} to {} and preserved CF={}",
+            operand_name(destination),
+            format_width(before, width),
+            format_width(result, width),
+            bit(old_flags.cf)
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_neg(
+        &mut self,
+        destination: &Operand,
+        width: u8,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        memory_writes: &mut Vec<MemoryWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<String, RuntimeFault> {
+        let before = self.read_operand(destination, width, events)?;
+        let (result, flags) = arithmetic(ArithmeticKind::Sub, 0, before, width);
+        let old_flags = self.flags;
+        self.write_operand(
+            destination,
+            result,
+            width,
+            register_writes,
+            memory_writes,
+            events,
+        )?;
+        self.flags = flags;
+        events.push(StepEvent::Arithmetic {
+            operation: "neg".to_string(),
+            left: format_width(0, width),
+            right: format_width(before, width),
+            result: format_width(result, width),
+            width,
+        });
+        events.push(StepEvent::FlagsChanged {
+            before: old_flags.into(),
+            after: flags.into(),
+        });
+        Ok(format!(
+            "neg computed 0 − {} = {} in {}. OF={} identifies the most-negative-value case.",
+            format_width(before, width),
+            format_width(result, width),
+            operand_name(destination),
+            bit(flags.of)
+        ))
+    }
+
+    fn apply_test(
+        &mut self,
+        source: &Operand,
+        destination: &Operand,
+        width: u8,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<String, RuntimeFault> {
+        let right = self.read_operand(source, width, events)?;
+        let left = self.read_operand(destination, width, events)?;
+        let result = left & right;
+        let old_flags = self.flags;
+        self.flags = logical_flags(result, width);
+        events.push(StepEvent::Arithmetic {
+            operation: "test".to_string(),
+            left: format_width(left, width),
+            right: format_width(right, width),
+            result: format_width(result, width),
+            width,
+        });
+        events.push(StepEvent::FlagsChanged {
+            before: old_flags.into(),
+            after: self.flags.into(),
+        });
+        Ok(format!(
+            "test set flags from {} AND {} = {} without storing the result.",
+            format_width(left, width),
+            format_width(right, width),
+            format_width(result, width)
+        ))
+    }
+
+    fn apply_div(
+        &mut self,
+        source: &Operand,
+        width: u8,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<String, RuntimeFault> {
+        if width != 64 {
+            return Err(RuntimeFault::new(
+                "unsupported_division_width",
+                "this Lecture 6 slice models the divq form used by writeInt",
+            ));
+        }
+        let divisor = self.read_operand(source, width, events)?;
+        if divisor == 0 {
+            return Err(RuntimeFault::new(
+                "division_by_zero",
+                "divq divisor is zero",
+            ));
+        }
+        let rax = RegisterRef::parse("rax").unwrap();
+        let rdx = RegisterRef::parse("rdx").unwrap();
+        let low = self.read_register(rax, events);
+        let high = self.read_register(rdx, events);
+        let dividend = (u128::from(high) << 64) | u128::from(low);
+        let quotient = dividend / u128::from(divisor);
+        if quotient > u128::from(u64::MAX) {
+            return Err(RuntimeFault::new(
+                "division_overflow",
+                "divq quotient does not fit in %rax",
+            ));
+        }
+        let remainder = dividend % u128::from(divisor);
+        self.write_register(rax, quotient as u64, register_writes, events);
+        self.write_register(rdx, remainder as u64, register_writes, events);
+        events.push(StepEvent::Division {
+            dividend_high: hex64(high),
+            dividend_low: hex64(low),
+            divisor: hex64(divisor),
+            quotient: hex64(quotient as u64),
+            remainder: hex64(remainder as u64),
+            width,
+        });
+        Ok(format!(
+            "divq divided %rdx:%rax ({dividend}) by {divisor}; quotient {} went to %rax and remainder {} to %rdx.",
+            quotient, remainder
+        ))
+    }
+
     fn apply_jump(
         &mut self,
         condition: JumpCondition,
@@ -840,6 +1151,8 @@ impl Machine {
         events: &mut Vec<StepEvent>,
     ) -> Result<String, RuntimeFault> {
         let return_address = program.text_address(self.pc);
+        let stack_pointer_before = self.registers.canonical(CanonicalRegister::Rsp);
+        let aligned_before = stack_pointer_before % 16 == 0;
         let stack_pointer =
             self.push_value(return_address, register_writes, memory_writes, events)?;
         let return_location = program
@@ -850,9 +1163,17 @@ impl Machine {
             target: target_label.to_string(),
             return_address: hex64(return_address),
             return_location,
+            stack_pointer_before: hex64(stack_pointer_before),
+            aligned_before,
         });
         Ok(format!(
-            "call pushed the return address {} at {} and transferred control to `{target_label}`.",
+            "call saw %rsp={} ({} for a call), pushed the return address {} at {}, and transferred control to `{target_label}`.",
+            hex64(stack_pointer_before),
+            if aligned_before {
+                "16-byte aligned"
+            } else {
+                "not 16-byte aligned"
+            },
             hex64(return_address),
             hex64(stack_pointer)
         ))
@@ -937,6 +1258,31 @@ impl Machine {
         }
         self.write_register(rsp, after, register_writes, events);
         Ok((value, after))
+    }
+
+    fn apply_leave(
+        &mut self,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        memory_writes: &mut Vec<MemoryWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<String, RuntimeFault> {
+        let rbp = RegisterRef::parse("rbp").unwrap();
+        let rsp = RegisterRef::parse("rsp").unwrap();
+        let frame_pointer = self.registers.read(rbp);
+        self.mapped_range(frame_pointer, 8)?;
+        self.write_register(rsp, frame_pointer, register_writes, events);
+        let (saved_rbp, stack_pointer) = self.pop_value(register_writes, memory_writes, events)?;
+        self.write_register(rbp, saved_rbp, register_writes, events);
+        events.push(StepEvent::StackPop {
+            value: hex64(saved_rbp),
+            stack_pointer: hex64(stack_pointer),
+        });
+        Ok(format!(
+            "leave moved %rbp ({}) into %rsp, popped the saved caller frame pointer {}, and left %rsp at {}.",
+            hex64(frame_pointer),
+            hex64(saved_rbp),
+            hex64(stack_pointer)
+        ))
     }
 
     fn apply_syscall(
@@ -1342,6 +1688,7 @@ impl JumpCondition {
             Self::BelowOrEqual => "jbe",
             Self::Above => "ja",
             Self::AboveOrEqual => "jae",
+            Self::NoOverflow => "jno",
         }
     }
 
@@ -1358,6 +1705,7 @@ impl JumpCondition {
             Self::BelowOrEqual => "unsigned below-or-equal (CF = 1 or ZF = 1)",
             Self::Above => "unsigned above (CF = 0 and ZF = 0)",
             Self::AboveOrEqual => "unsigned above-or-equal (CF = 0)",
+            Self::NoOverflow => "no signed overflow (OF = 0)",
         }
     }
 
@@ -1374,6 +1722,7 @@ impl JumpCondition {
             Self::BelowOrEqual => flags.cf || flags.zf,
             Self::Above => !flags.cf && !flags.zf,
             Self::AboveOrEqual => !flags.cf,
+            Self::NoOverflow => !flags.of,
         }
     }
 
@@ -1404,6 +1753,7 @@ impl JumpCondition {
             }
             Self::Above => format!("CF={} and ZF={}", bit(flags.cf), bit(flags.zf)),
             Self::AboveOrEqual => format!("CF={} (needs 0)", bit(flags.cf)),
+            Self::NoOverflow => format!("OF={} (needs 0)", bit(flags.of)),
         }
     }
 }
@@ -1477,6 +1827,16 @@ fn width_mask(width: u8) -> u64 {
         16 => u16::MAX as u64,
         8 => u8::MAX as u64,
         _ => unreachable!("validated width"),
+    }
+}
+
+fn signed_value(value: u64, width: u8) -> i128 {
+    let value = value & width_mask(width);
+    let sign = 1_u64 << (width - 1);
+    if value & sign == 0 {
+        i128::from(value)
+    } else {
+        i128::from(value) - (1_i128 << width)
     }
 }
 

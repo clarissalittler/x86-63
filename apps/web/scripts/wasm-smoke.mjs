@@ -17,7 +17,17 @@ assert.deepEqual(
   lessons.slice(0, 4).map((lesson) => lesson.id),
   ["first", "firstfixed", "firstadd", "firstsub"]
 );
-assert.equal(lessons.length, 21);
+assert.equal(lessons.length, 25);
+
+function lessonModules(lesson) {
+  return [
+    { name: lesson.module_name, source: lesson.source },
+    ...lesson.support_modules.map((module) => ({
+      name: module.module_name,
+      source: module.source
+    }))
+  ];
+}
 
 const expectedStatus = new Map([
   ["first", { kind: "faulted", code: "fell_off_text" }],
@@ -40,23 +50,26 @@ const expectedStatus = new Map([
   ["routine", { kind: "exited", shell_status: 40 }],
   ["fun1", { kind: "exited", shell_status: 80 }],
   ["fun2", { kind: "exited", shell_status: 40 }],
-  ["funstack", { kind: "exited", shell_status: 40 }]
+  ["funstack", { kind: "exited", shell_status: 40 }],
+  ["readwrite", { kind: "exited", shell_status: 0 }],
+  ["facttrace", { kind: "exited", shell_status: 120 }],
+  ["fact", { kind: "exited", shell_status: 0 }],
+  ["sumlooparray", { kind: "exited", shell_status: 0 }]
 ]);
 
 for (const lesson of lessons) {
-  const session = new WasmSession(
-    JSON.stringify([{ name: lesson.module_name, source: lesson.source }])
-  );
+  const session = new WasmSession(JSON.stringify(lessonModules(lesson)));
   const initial = JSON.parse(session.view_json());
-  assert.equal(initial.protocol_version, 3);
+  assert.equal(initial.protocol_version, 4);
   assert.equal(initial.status.kind, "paused");
 
-  if (lesson.id === "echo") {
-    session.execute(JSON.stringify({ SubmitInput: { text: "browser" } }));
+  if (["echo", "readwrite", "fact"].includes(lesson.id)) {
+    const text = lesson.id === "fact" ? "5" : lesson.id === "readwrite" ? "123" : "browser";
+    session.execute(JSON.stringify({ SubmitInput: { text } }));
   }
 
   const result = JSON.parse(
-    session.execute(JSON.stringify({ Continue: { max_steps: 300 } }))
+    session.execute(JSON.stringify({ Continue: { max_steps: 2_000 } }))
   );
   const expected = expectedStatus.get(lesson.id);
   assert.equal(result.view.status.kind, expected.kind, lesson.id);
@@ -100,15 +113,37 @@ assert.equal(echoed.view.io.stdout_escaped, "hello\\n");
 interactiveInput.free();
 
 const funStack = lessons.find((lesson) => lesson.id === "funstack");
-const stack = new WasmSession(
-  JSON.stringify([{ name: funStack.module_name, source: funStack.source }])
-);
+const stack = new WasmSession(JSON.stringify(lessonModules(funStack)));
 stack.execute(JSON.stringify("Step"));
 const call = JSON.parse(stack.execute(JSON.stringify("Step")));
 assert.equal(call.view.stack.slots.length, 1);
 assert.match(call.view.stack.slots[0].label, /return to funStack\.s:21/);
 assert.equal(typeof call.view.stack.slots[0].value, "string");
 stack.free();
+
+const factorial = lessons.find((lesson) => lesson.id === "fact");
+assert.deepEqual(
+  factorial.support_modules.map((module) => module.module_name),
+  ["readInt.s", "writeInt.s"]
+);
+const linkedFactorial = new WasmSession(JSON.stringify(lessonModules(factorial)));
+linkedFactorial.execute(JSON.stringify({ SubmitInput: { text: "5" } }));
+const factorialResult = JSON.parse(
+  linkedFactorial.execute(JSON.stringify({ Continue: { max_steps: 2_000 } }))
+);
+assert.equal(factorialResult.view.io.stdout_escaped, "Enter a number: 120");
+linkedFactorial.free();
+
+const factTrace = lessons.find((lesson) => lesson.id === "facttrace");
+const recursion = new WasmSession(JSON.stringify(lessonModules(factTrace)));
+let recursiveView = JSON.parse(recursion.view_json());
+for (let step = 0; step < 100 && recursiveView.stack.frames.length < 5; step += 1) {
+  recursiveView = JSON.parse(recursion.execute(JSON.stringify("Step"))).view;
+}
+assert.equal(recursiveView.stack.frames.length, 5);
+assert.ok(recursiveView.stack.frames.every((frame) => frame.function === "fact"));
+assert.ok(recursiveView.stack.frames.every((frame) => frame.aligned_at_call));
+recursion.free();
 
 const add = lessons.find((lesson) => lesson.id === "firstadd");
 const reversible = new WasmSession(
@@ -140,4 +175,4 @@ try {
 assert.equal(buildError.diagnostics[0].code, "E212");
 assert.match(buildError.diagnostics[0].help, /\$60/);
 
-console.log("WASM protocol smoke test passed for all 21 Lecture 3–5 lessons.");
+console.log("WASM protocol smoke test passed for all 25 Lecture 3–6 lessons.");

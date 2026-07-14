@@ -25,16 +25,27 @@ type TutorialStep = {
   check: (view: MachineView) => boolean;
 };
 
-type TutorialKind = "registers" | "memory" | "functions";
+type TutorialKind = "registers" | "memory" | "functions" | "recursion";
+type EditableModule = { name: string; source: string };
 
 const emptyFlags = { cf: false, pf: false, af: false, zf: false, sf: false, of: false };
+
+function lessonModules(lesson: Lesson): EditableModule[] {
+  return [
+    { name: lesson.module_name, source: lesson.source },
+    ...lesson.support_modules.map((module) => ({
+      name: module.module_name,
+      source: module.source
+    }))
+  ];
+}
 
 export default function App() {
   const session = useRef<WasmSession | null>(null);
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [selectedId, setSelectedId] = useState("firstadd");
-  const [moduleName, setModuleName] = useState("firstadd.s");
-  const [source, setSource] = useState("");
+  const [modules, setModules] = useState<EditableModule[]>([]);
+  const [activeModuleName, setActiveModuleName] = useState("firstadd.s");
   const [view, setView] = useState<MachineView | null>(null);
   const [program, setProgram] = useState<ProgramView | null>(null);
   const [result, setResult] = useState<CommandResult | null>(null);
@@ -56,9 +67,10 @@ export default function App() {
         const initial = loaded.find((lesson) => lesson.id === "firstadd") ?? loaded[0];
         if (initial) {
           setSelectedId(initial.id);
-          setModuleName(initial.module_name);
-          setSource(initial.source);
-          loadSession(initial.module_name, initial.source);
+          const nextModules = lessonModules(initial);
+          setModules(nextModules);
+          setActiveModuleName(initial.module_name);
+          loadSession(nextModules);
         }
       })
       .catch((error: unknown) => {
@@ -71,15 +83,17 @@ export default function App() {
     };
   }, []);
 
-  const loadSession = (name: string, nextSource: string) => {
+  const loadSession = (nextModules: EditableModule[]) => {
     try {
       session.current?.free();
-      session.current = new WasmSession(JSON.stringify([{ name, source: nextSource }]));
-      setView(JSON.parse(session.current.view_json()) as MachineView);
+      session.current = new WasmSession(JSON.stringify(nextModules));
+      const nextView = JSON.parse(session.current.view_json()) as MachineView;
+      setView(nextView);
       setProgram(JSON.parse(session.current.program_json()) as ProgramView);
       setResult(null);
       setDiagnostics([]);
       setStdinDraft("");
+      if (nextView.next_instruction) setActiveModuleName(nextView.next_instruction.module);
     } catch (error: unknown) {
       session.current = null;
       setView(null);
@@ -95,6 +109,7 @@ export default function App() {
       const next = JSON.parse(session.current.execute(JSON.stringify(command))) as CommandResult;
       setResult(next);
       setView(next.view);
+      if (next.view.next_instruction) setActiveModuleName(next.view.next_instruction.module);
       setDiagnostics(next.diagnostics);
       setTutorialFeedback(null);
     } catch (error: unknown) {
@@ -105,22 +120,31 @@ export default function App() {
   const chooseLesson = (id: string) => {
     const lesson = lessons.find((candidate) => candidate.id === id);
     if (!lesson) return;
+    const nextModules = lessonModules(lesson);
     setSelectedId(id);
-    setModuleName(lesson.module_name);
-    setSource(lesson.source);
-    loadSession(lesson.module_name, lesson.source);
+    setModules(nextModules);
+    setActiveModuleName(lesson.module_name);
+    loadSession(nextModules);
     setTutorialOpen(false);
     setTutorialFeedback(null);
   };
 
   const startTutorial = (kind: TutorialKind = "registers") => {
-    const lessonId = kind === "memory" ? "addarray3" : kind === "functions" ? "funstack" : "firstadd";
+    const lessonId =
+      kind === "memory"
+        ? "addarray3"
+        : kind === "functions"
+          ? "funstack"
+          : kind === "recursion"
+            ? "facttrace"
+            : "firstadd";
     const lesson = lessons.find((candidate) => candidate.id === lessonId);
     if (!lesson) return;
+    const nextModules = lessonModules(lesson);
     setSelectedId(lesson.id);
-    setModuleName(lesson.module_name);
-    setSource(lesson.source);
-    loadSession(lesson.module_name, lesson.source);
+    setModules(nextModules);
+    setActiveModuleName(lesson.module_name);
+    loadSession(nextModules);
     setTutorialKind(kind);
     setTutorialStep(0);
     setTutorialFeedback(null);
@@ -139,6 +163,17 @@ export default function App() {
   };
 
   const selectedLesson = lessons.find((lesson) => lesson.id === selectedId);
+  const activeModule = modules.find((module) => module.name === activeModuleName) ?? modules[0];
+
+  const updateActiveModule = (update: (module: EditableModule) => EditableModule) => {
+    if (!activeModule) return;
+    const previousName = activeModule.name;
+    const next = update(activeModule);
+    setModules((current) =>
+      current.map((module) => (module.name === previousName ? next : module))
+    );
+    if (next.name !== previousName) setActiveModuleName(next.name);
+  };
   const changed = useMemo(
     () =>
       new Set(
@@ -232,7 +267,14 @@ export default function App() {
           >
             Stack tutorial
           </button>
-          <button onClick={() => loadSession(moduleName, source)} disabled={!lessons.length}>
+          <button
+            className="tutorial-trigger recursion-tutorial-trigger"
+            onClick={() => startTutorial("recursion")}
+            disabled={!lessons.length}
+          >
+            Recursion tutorial
+          </button>
+          <button onClick={() => loadSession(modules)} disabled={!lessons.length}>
             Assemble
           </button>
           <button onClick={() => execute("Reset")} disabled={!session.current}>
@@ -276,6 +318,8 @@ export default function App() {
               ? "Memory and addressing"
               : tutorialKind === "functions"
                 ? "Calls and stack frames"
+                : tutorialKind === "recursion"
+                  ? "Recursive frame chains"
                 : "Registers and arithmetic"
           }
           steps={tutorialSteps(tutorialKind)}
@@ -298,20 +342,36 @@ export default function App() {
         <div className="source-column panel">
           <div className="panel-heading">
             <h2>Source</h2>
+            {modules.length > 1 && (
+              <select
+                className="module-select"
+                aria-label="Source module"
+                value={activeModule?.name ?? ""}
+                onChange={(event) => setActiveModuleName(event.target.value)}
+              >
+                {modules.map((module) => (
+                  <option value={module.name} key={module.name}>{module.name}</option>
+                ))}
+              </select>
+            )}
             <input
               aria-label="Module name"
-              value={moduleName}
-              onChange={(event) => setModuleName(event.target.value)}
+              value={activeModule?.name ?? ""}
+              onChange={(event) =>
+                updateActiveModule((module) => ({ ...module, name: event.target.value }))
+              }
             />
           </div>
           <textarea
             className="source-editor"
             aria-label="Assembly source"
             spellCheck={false}
-            value={source}
-            onChange={(event) => setSource(event.target.value)}
+            value={activeModule?.source ?? ""}
+            onChange={(event) =>
+              updateActiveModule((module) => ({ ...module, source: event.target.value }))
+            }
           />
-          <SourceListing program={program} view={view} />
+          <SourceListing program={program} view={view} moduleName={activeModule?.name ?? null} />
         </div>
 
         <div className="machine-column">
@@ -418,8 +478,16 @@ function Tutorial({
   );
 }
 
-function SourceListing({ program, view }: { program: ProgramView | null; view: MachineView | null }) {
-  const module = program?.modules[0];
+function SourceListing({
+  program,
+  view,
+  moduleName
+}: {
+  program: ProgramView | null;
+  view: MachineView | null;
+  moduleName: string | null;
+}) {
+  const module = program?.modules.find((candidate) => candidate.name === moduleName) ?? program?.modules[0];
   if (!module) return null;
   return (
     <ol className="source-listing" aria-label="Assembled source with current instruction">
@@ -444,6 +512,7 @@ function EventSummary({ events }: { events: StepEvent[] }) {
       "memory_read",
       "memory_write",
       "arithmetic",
+      "division",
       "compare",
       "branch",
       "call",
@@ -474,6 +543,8 @@ function eventText(event: StepEvent): string {
       return `%${event.register}: ${event.before} → ${event.after}`;
     case "arithmetic":
       return `${event.operation}: ${event.left} and ${event.right} produced ${event.result}`;
+    case "division":
+      return `div: ${event.dividend_high}:${event.dividend_low} ÷ ${event.divisor} → quotient ${event.quotient}, remainder ${event.remainder}`;
     case "effective_address":
       return `${event.expression} resolves to ${event.address}${event.symbol ? ` (${event.symbol})` : ""}`;
     case "memory_read":
@@ -485,7 +556,7 @@ function eventText(event: StepEvent): string {
     case "branch":
       return `${event.condition} → ${event.target}: ${event.predicate}; ${event.taken ? "taken" : "not taken"}`;
     case "call":
-      return `call ${event.target}: pushed return address ${event.return_address}`;
+      return `call ${event.target}: %rsp ${event.stack_pointer_before} was ${event.aligned_before ? "16-byte aligned" : "misaligned"}; pushed return address ${event.return_address}`;
     case "return":
       return `ret: popped ${event.return_address}${event.return_location ? ` → ${event.return_location.module}:${event.return_location.line}` : ""}`;
     case "stack_push":
@@ -576,9 +647,26 @@ function StackPanel({
       <div className="panel-heading">
         <h2>Stack</h2>
         <span className="memory-size">
-          %rsp {stack.rsp} · %rbp {stack.rbp}
+          %rsp mod 16 = {stack.rsp_mod_16} · {stack.aligned_for_call ? "ready for call" : "not call-aligned"}
         </span>
       </div>
+      {stack.frames.length > 0 && (
+        <div className="frame-chain" aria-label="Active stack frames">
+          <h3>Frame chain · newest first</h3>
+          {stack.frames.map((frame) => (
+            <article className="stack-frame" key={`${frame.depth}-${frame.rbp}`}>
+              <strong>#{frame.depth} · {frame.function ?? "unknown function"}</strong>
+              <code>%rbp {frame.rbp}</code>
+              <small>
+                returns to {frame.return_location
+                  ? `${frame.return_location.module}:${frame.return_location.line}`
+                  : frame.return_address}
+                {frame.aligned_at_call ? " · aligned call" : " · misaligned call"}
+              </small>
+            </article>
+          ))}
+        </div>
+      )}
       {stack.slots.length === 0 ? (
         <p className="empty-state">The stack is empty at its initial aligned top, {stack.top}.</p>
       ) : (
@@ -779,6 +867,7 @@ function stackUnsigned(view: MachineView, offsetFromRbp: number): string | undef
 function tutorialSteps(kind: TutorialKind): TutorialStep[] {
   if (kind === "memory") return memoryTutorialSteps;
   if (kind === "functions") return functionTutorialSteps;
+  if (kind === "recursion") return recursionTutorialSteps;
   return registerTutorialSteps;
 }
 
@@ -1053,5 +1142,79 @@ const functionTutorialSteps: TutorialStep[] = [
       registerUnsigned(view, "rdi") === "40" &&
       view.stack.slots.length === 0 &&
       view.stack.rsp === view.stack.top
+  }
+];
+
+const recursionTutorialSteps: TutorialStep[] = [
+  {
+    title: "Start with a fixed argument",
+    instruction:
+      "This tracing harness keeps the input at 5 so the frame chain is the only moving part. Find `_start`; do not step yet.",
+    expected: "Line 25 should be next, %rdi should be 0, and no frames should be active.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 0 &&
+      view.next_instruction?.line === 25 &&
+      view.stack.frames.length === 0
+  },
+  {
+    title: "Place n in the argument register",
+    instruction: "Click Step once. The first call to fact will receive n=5 in %rdi.",
+    expected: "%rdi should be 5 and the call on line 26 should be next.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 1 &&
+      registerUnsigned(view, "rdi") === "5" &&
+      view.next_instruction?.line === 26
+  },
+  {
+    title: "Enter fact",
+    instruction:
+      "Click Step on `call fact`. The return address appears immediately; the frame itself gets an %rbp in the next two instructions.",
+    expected: "Line 7 should be next with one return-address slot and %rsp mod 16 equal to 8.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 2 &&
+      view.next_instruction?.line === 7 &&
+      view.stack.slots.length === 1 &&
+      view.stack.rsp_mod_16 === 8
+  },
+  {
+    title: "Build the first frame",
+    instruction:
+      "Click Step three times for push, the %rbp anchor, and 16 bytes of locals. Watch the alignment return to call-ready.",
+    expected: "One fact frame should be active, line 10 should be next, and %rsp should be 16-byte aligned.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 5 &&
+      view.next_instruction?.line === 10 &&
+      view.stack.frames.length === 1 &&
+      view.stack.frames[0]?.function === "fact" &&
+      view.stack.aligned_for_call
+  },
+  {
+    title: "Descend one recursive level",
+    instruction:
+      "Click Step eight times: cmp, jle, save n, dec, call, push, anchor %rbp, reserve locals. The new frame becomes #0.",
+    expected: "Two fact frames should be linked, the new call should have n=4, and line 10 should be next again.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 13 &&
+      view.next_instruction?.line === 10 &&
+      registerUnsigned(view, "rdi") === "4" &&
+      view.stack.frames.length === 2 &&
+      view.stack.frames.every((frame) => frame.function === "fact")
+  },
+  {
+    title: "Let the recursion unwind",
+    instruction:
+      "Click Run. The machine reaches n=1, returns 1, multiplies by each saved local on the way out, and tears down every frame.",
+    expected: "The program should exit with 120, %rdi should contain 120, and the frame chain should be empty.",
+    check: (view) =>
+      view.status.kind === "exited" &&
+      view.status.shell_status === 120 &&
+      registerUnsigned(view, "rdi") === "120" &&
+      view.stack.frames.length === 0 &&
+      view.stack.slots.length === 0
   }
 ];

@@ -446,9 +446,31 @@ fn draw_memory(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, view: &Mac
 fn draw_stack(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, view: &MachineView) {
     let changed = app.changed_memory();
     let mut lines = vec![Line::from(format!(
-        " %rsp {}  %rbp {}",
-        view.stack.rsp, view.stack.rbp
+        " %rsp {}  mod16={} {}  %rbp {}",
+        view.stack.rsp,
+        view.stack.rsp_mod_16,
+        if view.stack.aligned_for_call {
+            "call-ready"
+        } else {
+            "misaligned"
+        },
+        view.stack.rbp
     ))];
+    for stack_frame in &view.stack.frames {
+        lines.push(Line::styled(
+            format!(
+                " frame {} {} → {}",
+                stack_frame.depth,
+                stack_frame.function.as_deref().unwrap_or("?"),
+                stack_frame
+                    .return_location
+                    .as_ref()
+                    .map(|location| format!("{}:{}", location.module, location.line))
+                    .unwrap_or_else(|| stack_frame.return_address.clone())
+            ),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
     if view.stack.slots.is_empty() {
         lines.push(Line::from(format!(" empty at {}", view.stack.top)));
     } else {

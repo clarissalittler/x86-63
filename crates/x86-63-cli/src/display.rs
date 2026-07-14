@@ -91,12 +91,29 @@ pub fn print_result(result: &CommandResult) {
                 target,
                 return_address,
                 return_location,
+                stack_pointer_before,
+                aligned_before,
             } => println!(
-                "  call {target}: pushed {return_address}{}",
+                "  call {target}: %rsp {stack_pointer_before} was {}; pushed {return_address}{}",
+                if *aligned_before {
+                    "16-byte aligned"
+                } else {
+                    "not 16-byte aligned"
+                },
                 return_location
                     .as_ref()
                     .map(|location| format!(" (return to {}:{})", location.module, location.line))
                     .unwrap_or_default()
+            ),
+            StepEvent::Division {
+                dividend_high,
+                dividend_low,
+                divisor,
+                quotient,
+                remainder,
+                ..
+            } => println!(
+                "  div {dividend_high}:{dividend_low} by {divisor}: quotient {quotient}, remainder {remainder}"
             ),
             StepEvent::Return {
                 return_address,
@@ -213,7 +230,31 @@ pub fn print_output(view: &MachineView) {
 }
 
 pub fn print_stack(view: &MachineView) {
-    println!("  %rsp {}  %rbp {}", view.stack.rsp, view.stack.rbp);
+    println!(
+        "  %rsp {} (mod 16 = {}, {})  %rbp {}",
+        view.stack.rsp,
+        view.stack.rsp_mod_16,
+        if view.stack.aligned_for_call {
+            "ready for call"
+        } else {
+            "not call-aligned"
+        },
+        view.stack.rbp
+    );
+    for frame in &view.stack.frames {
+        println!(
+            "  frame {}  {}  %rbp {}  return {}{}",
+            frame.depth,
+            frame.function.as_deref().unwrap_or("unknown function"),
+            frame.rbp,
+            frame.return_address,
+            frame
+                .return_location
+                .as_ref()
+                .map(|location| format!(" → {}:{}", location.module, location.line))
+                .unwrap_or_default()
+        );
+    }
     if view.stack.slots.is_empty() {
         println!("  stack is empty at {}", view.stack.top);
         return;

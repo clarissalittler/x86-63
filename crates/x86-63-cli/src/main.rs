@@ -159,7 +159,13 @@ fn load_modules(input: &Input) -> Result<Vec<SourceModule>, String> {
         let lesson = x86_63_course::lesson(id).ok_or_else(|| {
             format!("unknown example `{id}`; run `x86-63 examples` to list choices")
         })?;
-        return Ok(vec![SourceModule::new(lesson.module_name, lesson.source)]);
+        let mut modules = vec![SourceModule::new(lesson.module_name, lesson.source)];
+        modules.extend(
+            x86_63_course::support_modules(lesson.id)
+                .iter()
+                .map(|module| SourceModule::new(module.module_name, module.source)),
+        );
+        return Ok(modules);
     }
     if input.files.is_empty() {
         let lesson = x86_63_course::lesson("firstadd").expect("bundled firstadd lesson");

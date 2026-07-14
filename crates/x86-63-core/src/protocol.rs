@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Diagnostic, Flags, MachineStatus, SourceLocation, SymbolView};
 
-// Version 3 adds line-oriented stdin, blocking reads, source-level calls, and
-// a stack projection while preserving string transport for every u64 value.
-pub const PROTOCOL_VERSION: u32 = 3;
+// Version 4 adds linked lesson modules, recursive frame projections, alignment
+// receipts, and the multiply/divide operations used by Lecture 6 helpers.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
@@ -64,8 +64,11 @@ pub struct StackView {
     pub top: String,
     pub rsp: String,
     pub rbp: String,
+    pub rsp_mod_16: u8,
+    pub aligned_for_call: bool,
     pub bytes: Vec<u8>,
     pub slots: Vec<StackSlotView>,
+    pub frames: Vec<StackFrameView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +78,17 @@ pub struct StackSlotView {
     pub signed: String,
     pub offset_from_rbp: Option<i64>,
     pub label: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackFrameView {
+    pub depth: usize,
+    pub function: Option<String>,
+    pub rbp: String,
+    pub saved_rbp: String,
+    pub return_address: String,
+    pub return_location: Option<SourceLocation>,
+    pub aligned_at_call: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +166,14 @@ pub enum StepEvent {
         result: String,
         width: u8,
     },
+    Division {
+        dividend_high: String,
+        dividend_low: String,
+        divisor: String,
+        quotient: String,
+        remainder: String,
+        width: u8,
+    },
     FlagsChanged {
         before: FlagsView,
         after: FlagsView,
@@ -172,6 +194,8 @@ pub enum StepEvent {
         target: String,
         return_address: String,
         return_location: Option<SourceLocation>,
+        stack_pointer_before: String,
+        aligned_before: bool,
     },
     Return {
         return_address: String,

@@ -345,6 +345,11 @@ button.primary {
   font-size: 0.78rem;
 }
 
+.module-select {
+  margin-left: auto;
+  max-width: 11rem;
+}
+
 .memory-symbols {
   display: grid;
   gap: 0.75rem;
@@ -432,6 +437,37 @@ button.primary {
 .stack-slots {
   display: grid;
   gap: 0.35rem;
+}
+
+.frame-chain {
+  background: #e8efe9;
+  border-radius: 0.45rem;
+  display: grid;
+  gap: 0.35rem;
+  margin-bottom: 0.65rem;
+  padding: 0.55rem;
+}
+
+.frame-chain h3 {
+  color: #52665d;
+  font-size: 0.75rem;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.stack-frame {
+  background: #fffdf7;
+  border-left: 4px solid #24735c;
+  border-radius: 0.3rem;
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.4rem 0.5rem;
+}
+
+.stack-frame code,
+.stack-frame small {
+  color: #52665d;
+  overflow-wrap: anywhere;
 }
 
 .stack-slot {
@@ -552,6 +588,18 @@ button.primary {
 
   .lesson-bar select {
     min-width: 0;
+    width: 100%;
+  }
+
+  .source-column .panel-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .source-column .panel-heading input,
+  .source-column .module-select {
+    margin-left: 0;
+    max-width: none;
     width: 100%;
   }
 

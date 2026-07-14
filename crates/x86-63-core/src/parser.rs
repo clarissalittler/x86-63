@@ -392,7 +392,7 @@ fn parse_directive(
                 diagnostics.push(
                     Diagnostic::error(
                         "E133",
-                        format!("section `{name}` is not in the Lecture 5 slice yet"),
+                        format!("section `{name}` is not in the Lecture 6 slice yet"),
                         Some(location.clone()),
                     )
                     .with_help("currently supported sections are .text, .data, .bss, and .rodata"),
@@ -407,7 +407,7 @@ fn parse_directive(
                 .with_help("write `.section .text`, `.section .data`, or `.section .bss`"),
             ),
         },
-        ".global" | ".globl" => {
+        ".global" | ".globl" | ".extern" => {
             if arguments.is_empty() {
                 diagnostics.push(Diagnostic::error(
                     "E131",
@@ -467,11 +467,11 @@ fn parse_directive(
         _ => diagnostics.push(
             Diagnostic::error(
                 "E132",
-                format!("directive `{directive}` is not in the Lecture 5 slice yet"),
+                format!("directive `{directive}` is not in the Lecture 6 slice yet"),
                 Some(location.clone()),
             )
             .with_help(
-                "supported directives include .text/.data/.bss/.rodata, .global/.globl, integer/string data, and .skip/.zero",
+                "supported directives include .text/.data/.bss/.rodata, .global/.globl/.extern, integer/string data, and .skip/.zero",
             ),
         ),
     }
@@ -595,6 +595,17 @@ fn parse_instruction(
         ));
     }
 
+    if mnemonic == "leave" {
+        if operands.is_empty() {
+            return Ok(Operation::Leave);
+        }
+        return Err(Diagnostic::error(
+            "E224",
+            "`leave` does not take an explicit operand",
+            Some(location),
+        ));
+    }
+
     if matches!(mnemonic.as_str(), "call" | "callq") {
         let target_label = one_operand(operands, &mnemonic, &location)?;
         let target = labels.get(target_label).copied().ok_or_else(|| {
@@ -632,6 +643,77 @@ fn parse_instruction(
         return Ok(Operation::Pop { destination });
     }
 
+    if matches!(mnemonic.as_str(), "movzbl" | "movzbq") {
+        let (source_text, destination_text) = split_operands(operands).map_err(|message| {
+            Diagnostic::error(
+                "E203",
+                format!("`{mnemonic}` {message}"),
+                Some(location.clone()),
+            )
+        })?;
+        let source = parse_operand(source_text, data_symbols, constants, &location, false)?;
+        let destination =
+            parse_operand(destination_text, data_symbols, constants, &location, true)?;
+        let Operand::Register(destination) = destination else {
+            return Err(Diagnostic::error(
+                "E221",
+                "zero-extension destination must be a register",
+                Some(location),
+            ));
+        };
+        let destination_width = if mnemonic == "movzbl" { 32 } else { 64 };
+        validate_operand_width(&source, 8, &mnemonic, &location)?;
+        ensure_register_width(destination, destination_width, &mnemonic, &location)?;
+        return Ok(Operation::MovZeroExtend {
+            source,
+            destination,
+            source_width: 8,
+            destination_width,
+        });
+    }
+
+    if mnemonic == "divq" {
+        let operand_text = one_operand(operands, &mnemonic, &location)?;
+        let source = parse_operand(operand_text, data_symbols, constants, &location, false)?;
+        if matches!(source, Operand::Immediate(_)) {
+            return Err(Diagnostic::error(
+                "E215",
+                "divq divisor must be a register or memory operand",
+                Some(location),
+            ));
+        }
+        validate_operand_width(&source, 64, &mnemonic, &location)?;
+        return Ok(Operation::Div { source, width: 64 });
+    }
+
+    if let Some((family, explicit_width)) = parse_unary_family(&mnemonic) {
+        let operand_text = one_operand(operands, &mnemonic, &location)?;
+        let destination = parse_operand(operand_text, data_symbols, constants, &location, true)?;
+        if matches!(destination, Operand::Immediate(_)) {
+            return Err(Diagnostic::error(
+                "E215",
+                format!("{mnemonic} destination cannot be an immediate value"),
+                Some(location),
+            ));
+        }
+        let width = explicit_width
+            .or_else(|| operand_register(&destination).map(RegisterRef::width))
+            .ok_or_else(|| {
+                Diagnostic::error(
+                    "E206",
+                    format!("cannot infer the width of `{mnemonic}` from a memory operand"),
+                    Some(location.clone()),
+                )
+                .with_help(format!("add a suffix, such as `{mnemonic}q`"))
+            })?;
+        validate_operand_width(&destination, width, &mnemonic, &location)?;
+        return Ok(match family {
+            UnaryFamily::Inc => Operation::Inc { destination, width },
+            UnaryFamily::Dec => Operation::Dec { destination, width },
+            UnaryFamily::Neg => Operation::Neg { destination, width },
+        });
+    }
+
     if let Some(condition) = parse_jump(&mnemonic) {
         if operands.is_empty() || operands.contains(',') {
             return Err(Diagnostic::error(
@@ -658,11 +740,11 @@ fn parse_instruction(
     let (family, explicit_width) = parse_family(&mnemonic).ok_or_else(|| {
         Diagnostic::error(
             "E202",
-            format!("instruction `{mnemonic}` is not in the Lecture 5 slice yet"),
+            format!("instruction `{mnemonic}` is not in the Lecture 6 slice yet"),
             Some(location.clone()),
         )
         .with_help(
-            "currently supported families are mov, lea, add, sub, xor, cmp, jumps, call/ret, push/pop, and syscall",
+            "supported families now include data movement, arithmetic, flags, branches, calls, stack frames, divq, and syscall",
         )
     })?;
 
@@ -727,6 +809,13 @@ fn parse_instruction(
         )
         .with_help("move one value through a register first"));
     }
+    if family == Family::Imul && !matches!(destination, Operand::Register(_)) {
+        return Err(Diagnostic::error(
+            "E221",
+            "two-operand imul requires a register destination",
+            Some(location),
+        ));
+    }
 
     Ok(match family {
         Family::Mov => Operation::Mov {
@@ -750,6 +839,16 @@ fn parse_instruction(
             width,
         },
         Family::Xor => Operation::Xor {
+            source,
+            destination,
+            width,
+        },
+        Family::Imul => Operation::Imul {
+            source,
+            destination,
+            width,
+        },
+        Family::Test => Operation::Test {
             source,
             destination,
             width,
@@ -781,9 +880,14 @@ enum Family {
     Lea,
     Cmp,
     Xor,
+    Imul,
+    Test,
 }
 
 fn parse_family(mnemonic: &str) -> Option<(Family, Option<u8>)> {
+    if mnemonic == "movabsq" {
+        return Some((Family::Mov, Some(64)));
+    }
     for (name, family) in [
         ("mov", Family::Mov),
         ("add", Family::Add),
@@ -791,6 +895,33 @@ fn parse_family(mnemonic: &str) -> Option<(Family, Option<u8>)> {
         ("lea", Family::Lea),
         ("cmp", Family::Cmp),
         ("xor", Family::Xor),
+        ("imul", Family::Imul),
+        ("test", Family::Test),
+    ] {
+        if mnemonic == name {
+            return Some((family, None));
+        }
+        for (suffix, width) in [('b', 8), ('w', 16), ('l', 32), ('q', 64)] {
+            if mnemonic == format!("{name}{suffix}") {
+                return Some((family, Some(width)));
+            }
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnaryFamily {
+    Inc,
+    Dec,
+    Neg,
+}
+
+fn parse_unary_family(mnemonic: &str) -> Option<(UnaryFamily, Option<u8>)> {
+    for (name, family) in [
+        ("inc", UnaryFamily::Inc),
+        ("dec", UnaryFamily::Dec),
+        ("neg", UnaryFamily::Neg),
     ] {
         if mnemonic == name {
             return Some((family, None));
@@ -817,6 +948,7 @@ fn parse_jump(mnemonic: &str) -> Option<JumpCondition> {
         "jbe" => JumpCondition::BelowOrEqual,
         "ja" => JumpCondition::Above,
         "jae" => JumpCondition::AboveOrEqual,
+        "jno" => JumpCondition::NoOverflow,
         _ => return None,
     })
 }

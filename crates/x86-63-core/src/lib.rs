@@ -12,7 +12,7 @@ pub use parser::compile;
 pub use program::{Program, ProgramView, SourceLocation, SourceModule, SymbolView};
 pub use protocol::{
     Command, CommandResult, FlagsView, IoView, MachineView, MemoryView, PROTOCOL_VERSION,
-    RegisterView, StackSlotView, StackView, StepEvent,
+    RegisterView, StackFrameView, StackSlotView, StackView, StepEvent,
 };
 pub use repl::{ReplInput, parse_repl_input};
 pub use session::{BuildError, Session};

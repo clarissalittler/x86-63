@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Lesson {
     pub id: &'static str,
     pub title: &'static str,
@@ -11,8 +11,21 @@ pub struct Lesson {
     pub source: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct LessonModule {
+    pub module_name: &'static str,
+    pub source: &'static str,
+}
+
+#[derive(Serialize)]
+pub struct LessonView<'a> {
+    #[serde(flatten)]
+    pub lesson: &'a Lesson,
+    pub support_modules: &'static [LessonModule],
+}
+
 pub fn lessons() -> &'static [Lesson] {
-    static LESSONS: [Lesson; 21] = [
+    static LESSONS: [Lesson; 25] = [
         Lesson {
             id: "first",
             title: "The deliberately incomplete program",
@@ -202,8 +215,72 @@ pub fn lessons() -> &'static [Lesson] {
             module_name: "funStack.s",
             source: include_str!("../../../course-content/lecture5/funStack.s"),
         },
+        Lesson {
+            id: "readwrite",
+            title: "Link readInt and writeInt",
+            lecture: 6,
+            summary: "Cross module boundaries, parse a line of digits, and print the integer again.",
+            prediction: "Which module owns the input buffer, and which return value crosses each call?",
+            module_name: "readWriteTest.s",
+            source: include_str!("../../../course-content/lecture6/readWriteTest.s"),
+        },
+        Lesson {
+            id: "facttrace",
+            title: "Factorial frame tracing lab",
+            lecture: 6,
+            summary: "Hold the input at 5 and concentrate on recursive frame growth and unwinding.",
+            prediction: "How many active fact frames appear before the base case returns 1?",
+            module_name: "factTrace.s",
+            source: include_str!("../../../course-content/lecture6/factTrace.s"),
+        },
+        Lesson {
+            id: "fact",
+            title: "Recursive factorial across three modules",
+            lecture: 6,
+            summary: "Read an integer, grow one frame per recursive call, multiply while returning, and print the result.",
+            prediction: "For input 5, which value must each frame preserve at -8(%rbp)?",
+            module_name: "fact.s",
+            source: include_str!("../../../course-content/lecture6/fact.s"),
+        },
+        Lesson {
+            id: "sumlooparray",
+            title: "Sum an array, then call writeInt",
+            lecture: 6,
+            summary: "Combine scaled indexing, a loop, and a helper function from another module.",
+            prediction: "What value reaches writeInt after the four quadwords are accumulated?",
+            module_name: "sumLoopArray.s",
+            source: include_str!("../../../course-content/lecture6/sumLoopArray.s"),
+        },
     ];
     &LESSONS
+}
+
+pub fn support_modules(id: &str) -> &'static [LessonModule] {
+    static READ_INT: LessonModule = LessonModule {
+        module_name: "readInt.s",
+        source: include_str!("../../../course-content/lecture6/readInt.s"),
+    };
+    static WRITE_INT: LessonModule = LessonModule {
+        module_name: "writeInt.s",
+        source: include_str!("../../../course-content/lecture6/writeInt.s"),
+    };
+    static IO_HELPERS: [LessonModule; 2] = [READ_INT, WRITE_INT];
+    static WRITE_HELPER: [LessonModule; 1] = [WRITE_INT];
+    match id {
+        "readwrite" | "fact" => &IO_HELPERS,
+        "sumlooparray" => &WRITE_HELPER,
+        _ => &[],
+    }
+}
+
+pub fn lesson_views() -> Vec<LessonView<'static>> {
+    lessons()
+        .iter()
+        .map(|lesson| LessonView {
+            lesson,
+            support_modules: support_modules(lesson.id),
+        })
+        .collect()
 }
 
 pub fn lesson(id: &str) -> Option<&'static Lesson> {
@@ -220,6 +297,10 @@ mod tests {
             assert!(lesson.source.contains("_start:"));
             assert!(!lesson.source.trim().is_empty());
             assert!(lessons()[..index].iter().all(|prior| prior.id != lesson.id));
+            for module in support_modules(lesson.id) {
+                assert!(!module.source.trim().is_empty());
+                assert!(!module.module_name.is_empty());
+            }
         }
     }
 }

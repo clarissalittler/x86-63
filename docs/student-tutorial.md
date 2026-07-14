@@ -1,15 +1,17 @@
 # Your first x86-63 traces
 
-The register lab takes about 15 minutes, the memory lab another 15, and the
-input-and-stack lab about 20. You will predict and run CS201 assembly, reverse
-register, memory, stack, and input changes, investigate a broken program, and
-use an assembler diagnostic to repair a mistake.
+The register lab takes about 15 minutes, the memory lab another 15, the
+input-and-stack lab about 20, and the linked-functions/recursion lab another
+20. You will predict and run CS201 assembly, reverse register, memory, stack,
+and input changes, investigate a broken program, and use an assembler
+diagnostic to repair a mistake.
 
-The current prototype teaches the maintained Lecture 3–5 subset: register and
+The current prototype teaches the maintained Lecture 3–6 subset: register and
 memory forms of `mov`/`add`/`sub`, `lea`, `cmp`, `xor`, conditional jumps,
 loops, `.data`/`.rodata`/`.bss`, `call`/`ret`/`push`/`pop`, and Linux
-`read`/`write`/`exit` through `syscall`. Lecture 6's multi-file integer I/O
-helpers and recursion are not in this build yet.
+`read`/`write`/`exit` through `syscall`. It also links `.extern` references
+across modules and runs the course's `readInt`, `writeInt`, and recursive
+factorial using zero extension, multiply/divide, `test`, `neg`, and `leave`.
 
 ## Learning goals
 
@@ -27,7 +29,12 @@ By the end, you should be able to explain:
 - how `call` stores a return address and `ret` retrieves it;
 - why the stack grows toward lower addresses and how `%rbp` names local slots;
   and
-- when **Step** and **Next** behave differently at a function call.
+- when **Step** and **Next** behave differently at a function call;
+- how `.extern` calls transfer control into another source module;
+- how `movzbl`, repeated multiply-by-10, and a byte loop parse ASCII digits;
+- how quotient and remainder from `divq` produce decimal output digits;
+- why `%rsp mod 16` should be zero immediately before a course call; and
+- how saved `%rbp` values form a reversible chain of recursive frames.
 
 ## Start in the browser
 
@@ -39,8 +46,10 @@ Choose **Guided tutorial**. It loads **Addition and AT&T operand order** and
 starts a seven-checkpoint register walkthrough. **Memory tutorial** loads
 **Base + index × scale** and starts a separate eight-checkpoint walkthrough.
 **Stack tutorial** loads **Stack frame and local variables** and walks through
-a call, its frame setup, two locals, teardown, and return. Keep the tutorial
-card open while you use the execution controls.
+a call, its frame setup, two locals, teardown, and return. **Recursion
+tutorial** fixes factorial's input at 5 and shows repeated `fact` frames growing
+and unwinding. Keep the tutorial card open while you use the execution
+controls.
 
 The screen has two source views:
 
@@ -48,6 +57,10 @@ The screen has two source views:
   **Assemble**.
 - The numbered lower box is the assembled program. Its yellow row is the
   instruction that will execute next.
+
+Linked Lecture 6 lessons add a **Source module** chooser. Step into a call and
+the chooser follows execution into `readInt.s` or `writeInt.s`; choose another
+module manually when you want to compare definitions before stepping.
 
 The right side shows every general-purpose register in hexadecimal and signed
 decimal, the six arithmetic flags, symbolic memory and exact bytes, the live
@@ -368,6 +381,113 @@ working register and leaves `%rdi = 20` for the second call. The instruction
 set does not decide which registers a routine may destroy—programmers need an
 agreed calling convention.
 
+## Follow a call into another source module
+
+Select **Link readInt and writeInt**. The main module declares two names without
+defining them:
+
+```asm
+.extern readInt
+.extern writeInt
+```
+
+Use the **Source module** chooser to confirm that the definitions live in
+`readInt.s` and `writeInt.s`. Assemble all three modules together; `.extern`
+does not create a function, but it tells the source reader that another module
+supplies the label.
+
+Return to `readWriteTest.s` and Step on `call readInt`. The yellow row moves to
+`readInt.s`, and the return-address slot says it will return to
+`readWriteTest.s:8`. Choose **Run** without queued input. Execution stops at the
+`read` syscall in `readInt.s`, not in the caller.
+
+Submit `123` and Step the syscall. Check that:
+
+- the shared `.bss` buffer begins with `31 32 33 0a`;
+- `%rax = 4`, because the newline is part of the terminal line; and
+- `readInt` saves that count, subtracts one, and asks `parseInt` to process
+  exactly three digits.
+
+At `call parseInt`, Step to enter the helper. Each loop iteration zero-extends
+one byte with `movzbl`, subtracts ASCII `'0'`, multiplies the accumulator by
+10, and adds the new digit:
+
+| Input byte | Digit | Old accumulator | `old × 10 + digit` |
+|---|---:|---:|---:|
+| `'1'` (`0x31`) | 1 | 0 | 1 |
+| `'2'` (`0x32`) | 2 | 1 | 12 |
+| `'3'` (`0x33`) | 3 | 12 | 123 |
+
+When `readInt` returns, `%rax` carries `123` across the module boundary. Reset,
+submit `123` before execution, Step to the first call, and choose **Next**.
+Next runs both `readInt` and its nested `parseInt` call, then stops back in
+`readWriteTest.s` with `%rax = 123` and a balanced stack.
+
+Step the move into `%rdi`, then Step into `writeInt`. Its 32-byte stack buffer
+is filled backward. Each `divq` divides the unsigned value in `%rdx:%rax` by
+10 and returns both pieces:
+
+| Dividend | Quotient in `%rax` | Remainder in `%rdx` | Stored byte |
+|---:|---:|---:|---|
+| 123 | 12 | 3 | `'3'` |
+| 12 | 1 | 2 | `'2'` |
+| 1 | 0 | 1 | `'1'` |
+
+Moving `%rsi` toward lower addresses makes those reverse-order remainders form
+the forward string `123`. `write` emits it, `leave` performs
+`mov %rbp,%rsp` plus `pop %rbp`, and `ret` returns to the main module.
+
+## Watch recursive frames grow and unwind
+
+Choose **Recursion tutorial**. It loads the compact **Factorial frame tracing
+lab**, which uses the same recursive function as the maintained course program
+but fixes `%rdi = 5` so input parsing does not obscure the stack trace.
+
+After the first `call fact`, the Stack panel reports `%rsp mod 16 = 8`: `call`
+has just pushed one eight-byte return address. Step through `push %rbp`, the
+move into `%rbp`, and `sub $16,%rsp`. The first frame appears and the stack is
+call-ready again:
+
+```text
+before call:       %rsp mod 16 = 0
+after call:        %rsp mod 16 = 8
+after push %rbp:   %rsp mod 16 = 0
+after 16B locals:  %rsp mod 16 = 0
+```
+
+The function saves its current argument at `-8(%rbp)`, decrements `%rdi`, and
+calls itself. Build the second frame as directed by the tutorial. The frame
+chain is newest first; every card names `fact`, its `%rbp`, and the source line
+to which it will return.
+
+Repeat the eight-instruction descent if you want to expose all five frames.
+Their preserved locals explain the later multiplications:
+
+| Frame argument | Saved local | Value returned upward |
+|---:|---:|---:|
+| 1 | base case | 1 |
+| 2 | 2 | 2 |
+| 3 | 3 | 6 |
+| 4 | 4 | 24 |
+| 5 | 5 | 120 |
+
+Choose **Back** after a frame's `mov %rsp,%rbp`. The newest frame disappears
+because reverse execution restores the previous `%rbp`; replaying the move
+reconstructs the same chain. Choose **Run** from any paused point. Each `leave`
+removes one frame, each `ret` follows its stored address, and the harness exits
+with status `120` and an empty stack.
+
+Finally select **Recursive factorial across three modules**, submit `5`, and
+Run. This is the maintained program rather than the compact harness. It prints
+exactly:
+
+```text
+Enter a number: 120
+```
+
+When you Step rather than Run, the Source module chooser follows the whole path:
+`fact.s → readInt.s → fact.s → writeInt.s → fact.s`.
+
 ## Make and repair a source mistake
 
 Return to **Addition and AT&T operand order**. In the dark editor, change:
@@ -438,7 +558,20 @@ the echo example with a line already queued, use the scriptable runner:
 
 ```sh
 cargo run -p x86-63-cli -- run --example echo --stdin hello
+cargo run -p x86-63-cli -- run --example fact --stdin 5
+cargo run -p x86-63-cli -- tui --example facttrace
 ```
+
+Bundled Lecture 6 examples automatically load their helper modules. For your
+own files, pass every module as a positional argument:
+
+```sh
+cargo run -p x86-63-cli -- run fact.s readInt.s writeInt.s --stdin 5
+```
+
+The TUI Stack pane prints `%rsp mod 16` and the active frame chain above the
+raw slots. Use `m` to return to it whenever a recursive `call` or `leave`
+switches the detail pane.
 
 For a line-oriented interface, use:
 

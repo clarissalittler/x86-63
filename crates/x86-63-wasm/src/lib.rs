@@ -8,7 +8,7 @@ pub fn start() {
 
 #[wasm_bindgen]
 pub fn lessons_json() -> Result<String, JsValue> {
-    serde_json::to_string(x86_63_course::lessons()).map_err(js_error)
+    serde_json::to_string(&x86_63_course::lesson_views()).map_err(js_error)
 }
 
 #[wasm_bindgen]

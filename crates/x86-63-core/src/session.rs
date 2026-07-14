@@ -8,7 +8,7 @@ use crate::parser::compile;
 use crate::program::{DATA_BASE, Program, ProgramView, SourceModule};
 use crate::protocol::{
     Command, CommandResult, IoView, MachineView, MemoryView, PROTOCOL_VERSION, RegisterView,
-    StackSlotView, StackView, StepEvent, escaped_bytes, hex64,
+    StackFrameView, StackSlotView, StackView, StepEvent, escaped_bytes, hex64,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,14 +153,66 @@ impl Session {
                 }
             })
             .collect();
+        let frames = self.stack_frames(rbp);
         StackView {
             base: hex64(active_base),
             top: hex64(STACK_START),
             rsp: hex64(rsp),
             rbp: hex64(rbp),
+            rsp_mod_16: (rsp % 16) as u8,
+            aligned_for_call: rsp % 16 == 0,
             bytes,
             slots,
+            frames,
         }
+    }
+
+    fn stack_frames(&self, initial_rbp: u64) -> Vec<StackFrameView> {
+        let mut frames = Vec::new();
+        let mut rbp = initial_rbp;
+        let mut seen = Vec::new();
+        while rbp != 0 && frames.len() < 128 && !seen.contains(&rbp) {
+            seen.push(rbp);
+            let Some(saved_rbp) = self.stack_quad(rbp) else {
+                break;
+            };
+            let Some(return_address) = rbp
+                .checked_add(8)
+                .and_then(|address| self.stack_quad(address))
+            else {
+                break;
+            };
+            frames.push(StackFrameView {
+                depth: frames.len(),
+                function: self
+                    .program
+                    .call_target_for_return_address(return_address)
+                    .map(str::to_string),
+                rbp: hex64(rbp),
+                saved_rbp: hex64(saved_rbp),
+                return_address: hex64(return_address),
+                return_location: self
+                    .program
+                    .location_for_text_address(return_address)
+                    .cloned(),
+                aligned_at_call: rbp
+                    .checked_add(16)
+                    .is_some_and(|stack_pointer| stack_pointer % 16 == 0),
+            });
+            rbp = saved_rbp;
+        }
+        frames
+    }
+
+    fn stack_quad(&self, address: u64) -> Option<u64> {
+        let offset = usize::try_from(address.checked_sub(STACK_BASE)?).ok()?;
+        let bytes: [u8; 8] = self
+            .machine
+            .stack
+            .get(offset..offset.checked_add(8)?)?
+            .try_into()
+            .ok()?;
+        Some(u64::from_le_bytes(bytes))
     }
 
     fn reset(&mut self) -> CommandResult {
@@ -413,6 +465,56 @@ mod tests {
         ));
         assert!(fault.view.io.stdout_bytes.is_empty());
         assert!(fault.view.io.stderr_bytes.is_empty());
+    }
+
+    #[test]
+    fn divq_reports_both_results_and_faults_on_zero() {
+        let mut successful = session(
+            ".text\n.global _start\n_start:\n mov $123,%rax\n xor %rdx,%rdx\n mov $10,%rbx\n divq %rbx\n mov $60,%rax\n syscall\n",
+        );
+        successful.execute(Command::Step);
+        successful.execute(Command::Step);
+        successful.execute(Command::Step);
+        let division = successful.execute(Command::Step);
+        assert_eq!(register(&division.view, "rax"), "0x000000000000000c");
+        assert_eq!(register(&division.view, "rdx"), "0x0000000000000003");
+        assert!(division.events.iter().any(|event| matches!(
+            event,
+            StepEvent::Division {
+                quotient,
+                remainder,
+                ..
+            } if quotient == "0x000000000000000c" && remainder == "0x0000000000000003"
+        )));
+
+        let mut zero = session(".text\n.global _start\n_start:\n xor %rbx,%rbx\n divq %rbx\n");
+        zero.execute(Command::Step);
+        let fault = zero.execute(Command::Step);
+        assert!(matches!(
+            fault.view.status,
+            MachineStatus::Faulted { ref code, .. } if code == "division_by_zero"
+        ));
+        let reversed = zero.execute(Command::Back);
+        assert_eq!(reversed.view.status, MachineStatus::Paused);
+        assert_eq!(
+            reversed.view.next_text.as_deref().map(str::trim),
+            Some("divq %rbx")
+        );
+    }
+
+    #[test]
+    fn inc_and_dec_preserve_the_carry_flag() {
+        let mut session = session(
+            ".text\n.global _start\n_start:\n xor %rax,%rax\n xor %rbx,%rbx\n sub $1,%rax\n inc %rbx\n dec %rbx\n",
+        );
+        for _ in 0..4 {
+            session.execute(Command::Step);
+        }
+        assert!(session.view().flags.cf);
+        assert_eq!(register(&session.view(), "rbx"), "0x0000000000000001");
+        session.execute(Command::Step);
+        assert!(session.view().flags.cf);
+        assert_eq!(register(&session.view(), "rbx"), "0x0000000000000000");
     }
 
     #[test]

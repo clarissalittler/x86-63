@@ -6,6 +6,12 @@ export type Lesson = {
   prediction: string;
   module_name: string;
   source: string;
+  support_modules: LessonModule[];
+};
+
+export type LessonModule = {
+  module_name: string;
+  source: string;
 };
 
 export type SourceLocation = {
@@ -61,8 +67,11 @@ export type MachineView = {
     top: string;
     rsp: string;
     rbp: string;
+    rsp_mod_16: number;
+    aligned_for_call: boolean;
     bytes: number[];
     slots: StackSlotView[];
+    frames: StackFrameView[];
   };
   io: {
     stdin_bytes: number[];
@@ -82,6 +91,16 @@ export type StackSlotView = {
   signed: string;
   offset_from_rbp: number | null;
   label: string | null;
+};
+
+export type StackFrameView = {
+  depth: number;
+  function: string | null;
+  rbp: string;
+  saved_rbp: string;
+  return_address: string;
+  return_location: SourceLocation | null;
+  aligned_at_call: boolean;
 };
 
 export type SymbolView = {
@@ -118,12 +137,19 @@ export type StepEvent = {
   return_address?: string;
   return_location?: SourceLocation | null;
   stack_pointer?: string;
+  stack_pointer_before?: string;
+  aligned_before?: boolean;
   taken?: boolean;
   fd?: number;
   bytes?: number[];
   escaped?: string;
   width?: number;
   count?: number;
+  dividend_high?: string;
+  dividend_low?: string;
+  divisor?: string;
+  quotient?: string;
+  remainder?: string;
 };
 
 export type CommandResult = {
