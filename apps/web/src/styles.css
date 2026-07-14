@@ -305,6 +305,11 @@ button.primary {
   color: #125231;
 }
 
+.status.waiting {
+  background: #fff0bd;
+  color: #6d4b00;
+}
+
 .status.faulted {
   background: #ffd4ca;
   color: #812b1d;
@@ -403,6 +408,63 @@ button.primary {
   gap: 0.4rem;
 }
 
+.stdin-form {
+  align-items: end;
+  display: grid;
+  gap: 0.4rem;
+  grid-template-columns: auto minmax(8rem, 1fr) auto;
+  margin-bottom: 0.8rem;
+}
+
+.stdin-form label {
+  font-size: 0.78rem;
+  font-weight: 800;
+  padding-bottom: 0.55rem;
+  text-transform: uppercase;
+}
+
+.input-stream {
+  border-bottom: 1px solid #d7ddd8;
+  margin-bottom: 0.8rem;
+  padding-bottom: 0.8rem;
+}
+
+.stack-slots {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.stack-slot {
+  align-items: center;
+  background: #f0f2ed;
+  border-left: 4px solid transparent;
+  border-radius: 0.35rem;
+  display: grid;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  gap: 0.3rem 0.75rem;
+  grid-template-columns: minmax(12rem, auto) minmax(12rem, 1fr);
+  padding: 0.45rem 0.55rem;
+}
+
+.stack-slot.changed {
+  background: #ffe08a;
+  border-left-color: #b97b00;
+}
+
+.stack-slot strong {
+  overflow-wrap: anywhere;
+}
+
+.stack-slot small {
+  color: #52665d;
+  grid-column: 1 / -1;
+}
+
+.empty-state {
+  color: #64756c;
+  margin: 0;
+}
+
 .output-stream + .output-stream {
   border-top: 1px solid #d7ddd8;
   margin-top: 0.8rem;
@@ -499,5 +561,16 @@ button.primary {
 
   .register {
     grid-template-columns: 2.7rem minmax(0, 1fr);
+  }
+
+  .stdin-form,
+  .stack-slot {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .stdin-form label,
+  .stack-slot small {
+    grid-column: auto;
   }
 }

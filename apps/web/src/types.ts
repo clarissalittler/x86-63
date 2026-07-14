@@ -24,6 +24,7 @@ export type Diagnostic = {
 
 export type MachineStatus =
   | { kind: "paused" }
+  | { kind: "waiting_for_input"; fd: number; address: string; count: number }
   | { kind: "exited"; raw_hex: string; signed: string; shell_status: number }
   | { kind: "faulted"; code: string; message: string };
 
@@ -55,13 +56,32 @@ export type MachineView = {
     bytes: number[];
     symbols: SymbolView[];
   };
+  stack: {
+    base: string;
+    top: string;
+    rsp: string;
+    rbp: string;
+    bytes: number[];
+    slots: StackSlotView[];
+  };
   io: {
+    stdin_bytes: number[];
+    stdin_escaped: string;
+    stdin_consumed: number;
     stdout_bytes: number[];
     stdout_escaped: string;
     stderr_bytes: number[];
     stderr_escaped: string;
   };
   history_depth: number;
+};
+
+export type StackSlotView = {
+  address: string;
+  value: string;
+  signed: string;
+  offset_from_rbp: number | null;
+  label: string | null;
 };
 
 export type SymbolView = {
@@ -95,11 +115,15 @@ export type StepEvent = {
   predicate?: string;
   condition?: string;
   target?: string;
+  return_address?: string;
+  return_location?: SourceLocation | null;
+  stack_pointer?: string;
   taken?: boolean;
   fd?: number;
   bytes?: number[];
   escaped?: string;
   width?: number;
+  count?: number;
 };
 
 export type CommandResult = {

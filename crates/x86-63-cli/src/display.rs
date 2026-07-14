@@ -87,8 +87,46 @@ pub fn print_result(result: &CommandResult) {
                 "  {condition} {target}: {predicate} → {}",
                 if *taken { "taken" } else { "not taken" }
             ),
+            StepEvent::Call {
+                target,
+                return_address,
+                return_location,
+            } => println!(
+                "  call {target}: pushed {return_address}{}",
+                return_location
+                    .as_ref()
+                    .map(|location| format!(" (return to {}:{})", location.module, location.line))
+                    .unwrap_or_default()
+            ),
+            StepEvent::Return {
+                return_address,
+                return_location,
+            } => println!(
+                "  ret: popped {return_address}{}",
+                return_location
+                    .as_ref()
+                    .map(|location| format!(" → {}:{}", location.module, location.line))
+                    .unwrap_or_default()
+            ),
+            StepEvent::StackPush {
+                value,
+                stack_pointer,
+            } => println!("  stack push {value}; %rsp = {stack_pointer}"),
+            StepEvent::StackPop {
+                value,
+                stack_pointer,
+            } => println!("  stack pop {value}; %rsp = {stack_pointer}"),
             StepEvent::Output { fd, escaped, .. } => {
                 println!("  write fd {fd}: `{escaped}`")
+            }
+            StepEvent::InputRequested { count, address, .. } => {
+                println!("  read blocked: waiting for up to {count} bytes at {address}")
+            }
+            StepEvent::InputSubmitted { escaped, .. } => {
+                println!("  stdin submitted: `{escaped}`")
+            }
+            StepEvent::InputRead { escaped, .. } => {
+                println!("  read consumed: `{escaped}`")
             }
             _ => {}
         }
@@ -105,40 +143,92 @@ pub fn print_result(result: &CommandResult) {
         MachineStatus::Faulted { code, message } => {
             println!("Program faulted ({code}): {message}.")
         }
+        MachineStatus::WaitingForInput { count, .. } => {
+            println!("Program is waiting for a stdin line (up to {count} bytes).")
+        }
         MachineStatus::Paused => {}
     }
 }
 
 pub fn print_memory(view: &MachineView) {
     if view.memory.bytes.is_empty() {
-        println!("  no .data bytes are mapped");
+        println!("  no data bytes are mapped");
         return;
     }
     for symbol in &view.memory.symbols {
         let name = directive_name(symbol.element_width);
         let count = symbol.size.div_ceil(symbol.element_width);
-        println!("  {} @ {}  {name} × {count}", symbol.name, symbol.address);
+        println!(
+            "  {} @ {}  {}  {name} × {count}",
+            symbol.name, symbol.address, symbol.section
+        );
         let bytes = &view.memory.bytes[symbol.offset..symbol.offset + symbol.size];
-        for (index, element) in bytes.chunks(symbol.element_width).enumerate() {
-            println!(
-                "    [{index:>2}] {:<23} signed {}",
-                format_bytes(element),
-                little_signed(element)
-            );
+        let compact_byte_buffer = symbol.element_width == 1 && symbol.size > 32;
+        let display_width = if compact_byte_buffer {
+            8
+        } else {
+            symbol.element_width
+        };
+        for (index, element) in bytes.chunks(display_width).enumerate() {
+            if compact_byte_buffer {
+                println!(
+                    "    [+{:>3}] {:<23} text `{}`",
+                    index * display_width,
+                    format_bytes(element),
+                    escape_bytes(element)
+                );
+            } else {
+                println!(
+                    "    [{index:>2}] {:<23} signed {}",
+                    format_bytes(element),
+                    little_signed(element)
+                );
+            }
         }
     }
 }
 
 pub fn print_output(view: &MachineView) {
-    if view.io.stdout_bytes.is_empty() && view.io.stderr_bytes.is_empty() {
+    if view.io.stdin_bytes.is_empty()
+        && view.io.stdout_bytes.is_empty()
+        && view.io.stderr_bytes.is_empty()
+    {
         println!("  no process output yet");
         return;
+    }
+    if !view.io.stdin_bytes.is_empty() {
+        println!(
+            "  stdin: `{}` ({} of {} byte(s) consumed)",
+            view.io.stdin_escaped,
+            view.io.stdin_consumed,
+            view.io.stdin_bytes.len()
+        );
     }
     if !view.io.stdout_bytes.is_empty() {
         println!("  stdout: `{}`", view.io.stdout_escaped);
     }
     if !view.io.stderr_bytes.is_empty() {
         println!("  stderr: `{}`", view.io.stderr_escaped);
+    }
+}
+
+pub fn print_stack(view: &MachineView) {
+    println!("  %rsp {}  %rbp {}", view.stack.rsp, view.stack.rbp);
+    if view.stack.slots.is_empty() {
+        println!("  stack is empty at {}", view.stack.top);
+        return;
+    }
+    for slot in &view.stack.slots {
+        println!(
+            "  {}  {}  signed {}{}",
+            slot.address,
+            slot.value,
+            slot.signed,
+            slot.label
+                .as_deref()
+                .map(|label| format!("  {label}"))
+                .unwrap_or_default()
+        );
     }
 }
 
@@ -202,6 +292,22 @@ fn format_bytes(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn escape_bytes(bytes: &[u8]) -> String {
+    let mut escaped = String::new();
+    for &byte in bytes {
+        match byte {
+            b'\n' => escaped.push_str("\\n"),
+            b'\r' => escaped.push_str("\\r"),
+            b'\t' => escaped.push_str("\\t"),
+            b'\\' => escaped.push_str("\\\\"),
+            0 => escaped.push_str("\\0"),
+            0x20..=0x7e => escaped.push(char::from(byte)),
+            _ => escaped.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    escaped
 }
 
 fn little_signed(bytes: &[u8]) -> i128 {

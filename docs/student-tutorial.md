@@ -1,14 +1,15 @@
 # Your first x86-63 traces
 
-The register lab takes about 15 minutes; the memory lab takes another 15. You
-will predict and run CS201 assembly, reverse both register and memory changes,
-investigate a broken program, and use an assembler diagnostic to repair a
-mistake.
+The register lab takes about 15 minutes, the memory lab another 15, and the
+input-and-stack lab about 20. You will predict and run CS201 assembly, reverse
+register, memory, stack, and input changes, investigate a broken program, and
+use an assembler diagnostic to repair a mistake.
 
-The current prototype teaches the maintained Lecture 3–4 subset: register and
+The current prototype teaches the maintained Lecture 3–5 subset: register and
 memory forms of `mov`/`add`/`sub`, `lea`, `cmp`, `xor`, conditional jumps,
-loops, `.data` directives, and Linux `write`/`exit` through `syscall`. Calls,
-the stack, and the course's integer I/O helpers are not in this build yet.
+loops, `.data`/`.rodata`/`.bss`, `call`/`ret`/`push`/`pop`, and Linux
+`read`/`write`/`exit` through `syscall`. Lecture 6's multi-file integer I/O
+helpers and recursion are not in this build yet.
 
 ## Learning goals
 
@@ -21,7 +22,12 @@ By the end, you should be able to explain:
 - how reverse stepping differs from merely moving a source highlight;
 - how `base + index × scale` becomes a concrete memory address;
 - how `.long` and `.quad` determine element width and stride; and
-- how `cmp` supplies the flags consumed by a later conditional jump.
+- how `cmp` supplies the flags consumed by a later conditional jump;
+- why `read` can block and why its return value determines a later `write`;
+- how `call` stores a return address and `ret` retrieves it;
+- why the stack grows toward lower addresses and how `%rbp` names local slots;
+  and
+- when **Step** and **Next** behave differently at a function call.
 
 ## Start in the browser
 
@@ -32,7 +38,9 @@ by `npm run web:dev`.
 Choose **Guided tutorial**. It loads **Addition and AT&T operand order** and
 starts a seven-checkpoint register walkthrough. **Memory tutorial** loads
 **Base + index × scale** and starts a separate eight-checkpoint walkthrough.
-Keep the tutorial card open while you use the execution controls.
+**Stack tutorial** loads **Stack frame and local variables** and walks through
+a call, its frame setup, two locals, teardown, and return. Keep the tutorial
+card open while you use the execution controls.
 
 The screen has two source views:
 
@@ -42,9 +50,9 @@ The screen has two source views:
   instruction that will execute next.
 
 The right side shows every general-purpose register in hexadecimal and signed
-decimal, the six arithmetic flags, symbolic memory and exact bytes, process
-output, execution status, history depth, and an explanation of the most recent
-transition.
+decimal, the six arithmetic flags, symbolic memory and exact bytes, the live
+stack, process input/output, execution status, history depth, and an explanation
+of the most recent transition.
 
 ## Trace addition
 
@@ -260,7 +268,7 @@ see that control flow is reversible as well.
 ## Inspect exact process output
 
 Select **Hello, bytes: the write syscall** and choose **Run**. The Process
-output panel renders the text and also preserves its escaped byte form:
+I/O panel renders the text and also preserves its escaped byte form:
 
 ```text
 Hello world!\n\0
@@ -269,6 +277,96 @@ Hello world!\n\0
 The terminating NUL is visible because `.asciz` emitted it and the equate
 `hellolen = . - msg` includes every byte through the current location. The
 terminal would make that last byte easy to miss; the teaching machine does not.
+
+Now select **write returns its byte count** and choose **Run**. This program
+copies `%rax` after `write` into the exit argument. Its shell status is `14`,
+the exact number of bytes written by `"Hello world!\n\0"`. A syscall number in
+`%rax` is an input before `syscall`; the kernel's return value replaces it.
+
+## Submit input and watch `read` block
+
+Select **Echo one input line**. The `.bss` symbol `buff` reserves 128 zeroed
+bytes without putting an initialized string in the executable.
+
+Choose **Run** without submitting input. Execution pauses on the `syscall` at
+line 14 and the status says **waiting for stdin**. The attempted `read` is not
+added to history because no machine transition has completed; the yellow row
+still names the same syscall.
+
+Type `hello` in the **stdin line** field and choose **Submit line**. x86-63
+queues `hello\n`, just as pressing Enter in a terminal supplies a line. Choose
+**Step** once and check all three consequences:
+
+- the first six bytes of `buff` are `68 65 6c 6c 6f 0a`;
+- `%rax` is `6`, the number of bytes actually read; and
+- Process I/O says that all 6 queued stdin bytes were consumed.
+
+Choose **Back** immediately. The buffer returns to zeros, the input cursor
+returns to the start of the queued line, and execution returns to the `read`
+syscall. Step again, then choose **Run**. The program copies the return count
+from `%rax` to `%rdx`, so `write` emits exactly `hello\n`, not all 128 bytes in
+the buffer.
+
+This is the key relationship:
+
+```text
+read return value in %rax → write count in %rdx
+```
+
+## Trace a call and a real stack frame
+
+Choose **Stack tutorial**. It loads **Stack frame and local variables**. The
+program computes `20 + 2 × 10`, but the point of this trace is where its
+temporary values live.
+
+Step over `mov $10,%rdi`, then step over `call fun`. `call` does two things as
+one instruction: it subtracts eight from `%rsp` and stores the address of the
+instruction after the call at that new stack address. The Stack panel labels
+that value as the return address, and the yellow source row jumps to `fun`.
+
+Continue one instruction at a time:
+
+1. `push %rbp` moves `%rsp` down another eight bytes and saves the caller's
+   frame pointer.
+2. `mov %rsp,%rbp` makes that address the stable anchor for this frame.
+3. `sub $16,%rsp` reserves two eight-byte local slots. The stack grows toward
+   lower addresses, so subtraction allocates space.
+4. `mov %rdi,-8(%rbp)` stores `10` in the first local.
+5. `add %rdi,-8(%rbp)` changes that local to `20`.
+6. `movq $20,-16(%rbp)` stores `20` in the second local.
+
+The address formulas are literal:
+
+```text
+first local  = %rbp - 8
+second local = %rbp - 16
+saved %rbp   = %rbp
+return value = %rbp + 8
+```
+
+Choose **Back** after writing either local. Its previous eight bytes return,
+which demonstrates that stack memory uses the same reversible state model as
+`.data` and `.bss`.
+
+Replay the write and continue. `mov %rbp,%rsp` discards both locals at once,
+`pop %rbp` restores the saved frame pointer, and `ret` pops the stored return
+address into control flow. The caller then sees `%rax = 40` and exits with
+status `40`.
+
+### Compare Step with Next
+
+Select **A routine that changes its argument**. Step once so the yellow row is
+on `call rdadder`, then choose **Next**. Next runs the call, its body, and its
+`ret`, stopping at the instruction after the call. `%rax` and `%rdi` are both
+`40`, and the stack is empty again. Reset and use **Step** at the same call to
+enter the routine and inspect its return address instead.
+
+Run this example to completion; it exits `80` because the routine doubles
+`%rdi` in place, so its second call receives `40`. Then run **A routine that
+preserves its argument**. It exits `40` because the routine uses `%r9` as its
+working register and leaves `%rdi = 20` for the second call. The instruction
+set does not decide which registers a routine may destroy—programmers need an
+agreed calling convention.
 
 ## Make and repair a source mistake
 
@@ -327,12 +425,20 @@ The keys are shown at the bottom of the screen:
 | Key | Action |
 |---|---|
 | `s`, `Enter`, or right arrow | Step one instruction |
-| `n` | Next; currently identical to Step because this slice has no calls |
+| `n` | Next; step over a call, otherwise step one instruction |
 | `b` or left arrow | Reverse one instruction |
 | `c` | Continue to exit or fault |
+| `i` | Enter one stdin line; Enter submits it and Esc cancels |
 | `r` | Reset to `_start` |
-| `m` | Toggle the right pane between registers and memory/output |
+| `m` | Cycle the right pane through registers, memory/I/O, and stack |
 | `q` or `Esc` | Leave the TUI |
+
+The TUI automatically opens its input editor when a `read` blocks. To start
+the echo example with a line already queued, use the scriptable runner:
+
+```sh
+cargo run -p x86-63-cli -- run --example echo --stdin hello
+```
 
 For a line-oriented interface, use:
 
@@ -340,9 +446,10 @@ For a line-oriented interface, use:
 cargo run -p x86-63-cli -- repl --example firstadd
 ```
 
-Enter `step` or the GDB-style alias `si`, then try `regs`, `memory`, `output`,
-`why`, `back`, `run`, `reset`, `help`, and `quit`. The browser buttons, TUI
-keys, and REPL commands all call the same execution engine.
+Enter `step` or the GDB-style alias `si`, then try `next`, `regs`, `memory`,
+`stack`, `output`, `input hello`, `why`, `back`, `run`, `reset`, `help`, and
+`quit`. The browser buttons, TUI keys, and REPL commands all call the same
+execution engine.
 
 ## Feedback for this prototype
 
@@ -351,7 +458,8 @@ When reporting your test, include:
 1. Which interface you used: browser, TUI, or REPL.
 2. The example and action immediately before the problem.
 3. What you expected and what actually happened.
-4. Whether **This step** helped you explain the state change.
+4. Whether **This step** and the Memory or Stack panel helped you explain the
+   state change.
 5. One place where you hesitated, even if the tool behaved correctly.
 
 A useful one-line report looks like:

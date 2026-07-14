@@ -52,10 +52,35 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> 
         if let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            if app.input_mode {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.input_mode = false;
+                        app.input_buffer.clear();
+                    }
+                    KeyCode::Enter => {
+                        let result = app.session.execute(Command::SubmitInput {
+                            text: std::mem::take(&mut app.input_buffer),
+                        });
+                        app.input_mode = false;
+                        app.last = Some(result);
+                    }
+                    KeyCode::Backspace => {
+                        app.input_buffer.pop();
+                    }
+                    KeyCode::Char(character) => app.input_buffer.push(character),
+                    _ => {}
+                }
+                continue;
+            }
             let command = match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Char('m') => {
                     app.detail = app.detail.toggle();
+                    None
+                }
+                KeyCode::Char('i') => {
+                    app.input_mode = true;
                     None
                 }
                 KeyCode::Char('s') | KeyCode::Right | KeyCode::Enter => Some(Command::Step),
@@ -70,6 +95,16 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> 
                 if result.events.iter().any(|event| {
                     matches!(
                         event,
+                        StepEvent::Call { .. }
+                            | StepEvent::Return { .. }
+                            | StepEvent::StackPush { .. }
+                            | StepEvent::StackPop { .. }
+                    )
+                }) {
+                    app.detail = DetailPane::Stack;
+                } else if result.events.iter().any(|event| {
+                    matches!(
+                        event,
                         StepEvent::EffectiveAddress { .. }
                             | StepEvent::MemoryRead { .. }
                             | StepEvent::MemoryWrite { .. }
@@ -77,6 +112,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> 
                     )
                 }) {
                     app.detail = DetailPane::Memory;
+                }
+                if matches!(result.view.status, MachineStatus::WaitingForInput { .. }) {
+                    app.input_mode = true;
                 }
                 app.last = Some(result);
             }
@@ -89,6 +127,8 @@ struct App {
     program: ProgramView,
     last: Option<CommandResult>,
     detail: DetailPane,
+    input_mode: bool,
+    input_buffer: String,
 }
 
 impl App {
@@ -99,6 +139,8 @@ impl App {
             program,
             last: None,
             detail: DetailPane::Registers,
+            input_mode: false,
+            input_buffer: String::new(),
         }
     }
 
@@ -144,13 +186,15 @@ impl App {
 enum DetailPane {
     Registers,
     Memory,
+    Stack,
 }
 
 impl DetailPane {
     fn toggle(self) -> Self {
         match self {
             Self::Registers => Self::Memory,
-            Self::Memory => Self::Registers,
+            Self::Memory => Self::Stack,
+            Self::Stack => Self::Registers,
         }
     }
 }
@@ -166,10 +210,18 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
         .split(outer[0]);
     draw_source(frame, columns[0], app);
     draw_machine(frame, columns[1], app);
-    let help =
-        Paragraph::new(" s/Enter step  n next  b/← back  c run  r reset  m regs/mem  q quit ")
-            .style(Style::default().fg(Color::Black).bg(Color::Cyan))
-            .block(Block::default().borders(Borders::ALL).title(" Keys "));
+    let help_text = if app.input_mode {
+        format!(
+            " stdin> {}  Enter submit line  Esc cancel ",
+            app.input_buffer
+        )
+    } else {
+        " s/Enter step  n next  b/← back  c run  i input  r reset  m regs/mem/stack  q quit "
+            .to_string()
+    };
+    let help = Paragraph::new(help_text)
+        .style(Style::default().fg(Color::Black).bg(Color::Cyan))
+        .block(Block::default().borders(Borders::ALL).title(" Keys "));
     frame.render_widget(help, outer[1]);
 }
 
@@ -227,12 +279,16 @@ fn draw_machine(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     match app.detail {
         DetailPane::Registers => draw_registers(frame, rows[0], app, &view),
         DetailPane::Memory => draw_memory(frame, rows[0], app, &view),
+        DetailPane::Stack => draw_stack(frame, rows[0], app, &view),
     }
 
     let status = match &view.status {
         MachineStatus::Paused => "paused".to_string(),
         MachineStatus::Exited { shell_status, .. } => {
             format!("exited; shell status {shell_status}")
+        }
+        MachineStatus::WaitingForInput { count, .. } => {
+            format!("waiting for stdin; up to {count} bytes")
         }
         MachineStatus::Faulted { code, .. } => format!("faulted: {code}"),
     };
@@ -363,6 +419,17 @@ fn draw_memory(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, view: &Mac
             Style::default().fg(Color::Red),
         ));
     }
+    if !view.io.stdin_bytes.is_empty() {
+        lines.push(Line::styled(
+            format!(
+                " stdin: `{}` ({}/{})",
+                view.io.stdin_escaped,
+                view.io.stdin_consumed,
+                view.io.stdin_bytes.len()
+            ),
+            Style::default().fg(Color::Green),
+        ));
+    }
     if lines.is_empty() {
         lines.push(Line::from(" No .data or process output yet."));
     }
@@ -370,8 +437,43 @@ fn draw_memory(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, view: &Mac
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Memory / output (m) "),
+                .title(" Memory / I/O (m) "),
         ),
+        area,
+    );
+}
+
+fn draw_stack(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App, view: &MachineView) {
+    let changed = app.changed_memory();
+    let mut lines = vec![Line::from(format!(
+        " %rsp {}  %rbp {}",
+        view.stack.rsp, view.stack.rbp
+    ))];
+    if view.stack.slots.is_empty() {
+        lines.push(Line::from(format!(" empty at {}", view.stack.top)));
+    } else {
+        for slot in &view.stack.slots {
+            let style = if changed.contains(&slot.address) {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::styled(
+                format!(" {}  {}", slot.address, slot.value),
+                style,
+            ));
+            if let Some(label) = &slot.label {
+                lines.push(Line::styled(
+                    format!("   {label}"),
+                    Style::default().fg(Color::Cyan),
+                ));
+            }
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Stack (m) ")),
         area,
     );
 }

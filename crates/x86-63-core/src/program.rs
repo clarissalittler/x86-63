@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::machine::Operation;
 
 pub(crate) const DATA_BASE: u64 = 0x0000_0000_0040_0000;
+pub(crate) const TEXT_BASE: u64 = 0x0000_0000_0040_1000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceModule {
@@ -42,6 +43,7 @@ pub struct Program {
     pub(crate) labels: BTreeMap<String, usize>,
     pub(crate) data_symbols: BTreeMap<String, u64>,
     pub(crate) data_symbol_widths: BTreeMap<String, usize>,
+    pub(crate) data_symbol_sections: BTreeMap<String, String>,
     pub(crate) constants: BTreeMap<String, u64>,
     pub(crate) initial_data: Vec<u8>,
     pub(crate) entry: usize,
@@ -107,10 +109,36 @@ impl Program {
                     offset: (*address - DATA_BASE) as usize,
                     size: next.saturating_sub(*address) as usize,
                     element_width: self.data_symbol_widths.get(name).copied().unwrap_or(1),
-                    section: ".data".to_string(),
+                    section: self
+                        .data_symbol_sections
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| ".data".to_string()),
                 }
             })
             .collect()
+    }
+
+    pub(crate) fn text_address(&self, instruction_index: usize) -> u64 {
+        TEXT_BASE + instruction_index as u64
+    }
+
+    pub(crate) fn instruction_index_for_address(&self, address: u64) -> Option<usize> {
+        let index = usize::try_from(address.checked_sub(TEXT_BASE)?).ok()?;
+        (index < self.instructions.len()).then_some(index)
+    }
+
+    pub(crate) fn location_for_text_address(&self, address: u64) -> Option<&SourceLocation> {
+        let index = self.instruction_index_for_address(address)?;
+        self.instructions
+            .get(index)
+            .map(|instruction| &instruction.location)
+    }
+
+    pub(crate) fn current_is_call(&self, pc: usize) -> bool {
+        self.instructions
+            .get(pc)
+            .is_some_and(|instruction| matches!(&instruction.operation, Operation::Call { .. }))
     }
 }
 

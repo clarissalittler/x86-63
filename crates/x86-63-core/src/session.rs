@@ -3,12 +3,12 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::diagnostic::Diagnostic;
-use crate::machine::{CanonicalRegister, Machine, StepDelta};
+use crate::machine::{CanonicalRegister, Machine, STACK_BASE, STACK_SIZE, STACK_START, StepDelta};
 use crate::parser::compile;
 use crate::program::{DATA_BASE, Program, ProgramView, SourceModule};
 use crate::protocol::{
     Command, CommandResult, IoView, MachineView, MemoryView, PROTOCOL_VERSION, RegisterView,
-    StepEvent, escaped_bytes, hex64,
+    StackSlotView, StackView, StepEvent, escaped_bytes, hex64,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,9 +51,11 @@ impl Session {
     pub fn execute(&mut self, command: Command) -> CommandResult {
         match command {
             Command::Reset => self.reset(),
-            Command::Step | Command::Next => self.step(),
+            Command::Step => self.step(),
+            Command::Next => self.next(),
             Command::Back => self.back(),
             Command::Continue { max_steps } => self.continue_for(max_steps),
+            Command::SubmitInput { text } => self.submit_input(&text),
         }
     }
 
@@ -83,7 +85,11 @@ impl Session {
                 bytes: self.machine.memory.clone(),
                 symbols,
             },
+            stack: self.stack_view(),
             io: IoView {
+                stdin_bytes: self.machine.stdin.clone(),
+                stdin_escaped: escaped_bytes(&self.machine.stdin),
+                stdin_consumed: self.machine.stdin_cursor,
                 stdout_bytes: self.machine.stdout.clone(),
                 stdout_escaped: escaped_bytes(&self.machine.stdout),
                 stderr_bytes: self.machine.stderr.clone(),
@@ -99,6 +105,62 @@ impl Session {
 
     pub fn last_explanation(&self) -> &str {
         &self.last_explanation
+    }
+
+    fn stack_view(&self) -> StackView {
+        let rsp = self.machine.registers.canonical(CanonicalRegister::Rsp);
+        let rbp = self.machine.registers.canonical(CanonicalRegister::Rbp);
+        let active_base = if (STACK_BASE..=STACK_START).contains(&rsp) {
+            rsp
+        } else {
+            STACK_START
+        };
+        let start = usize::try_from(active_base - STACK_BASE)
+            .unwrap_or(STACK_SIZE)
+            .min(STACK_SIZE);
+        let bytes = self.machine.stack[start..].to_vec();
+        let slots = bytes
+            .chunks(8)
+            .enumerate()
+            .map(|(index, chunk)| {
+                let address = active_base + (index * 8) as u64;
+                let mut padded = [0_u8; 8];
+                padded[..chunk.len()].copy_from_slice(chunk);
+                let value = u64::from_le_bytes(padded);
+                let offset_from_rbp = (rbp != 0)
+                    .then(|| address as i128 - rbp as i128)
+                    .and_then(|offset| i64::try_from(offset).ok());
+                let mut labels = Vec::new();
+                if address == rsp {
+                    labels.push("top of stack (%rsp)".to_string());
+                }
+                if address == rbp && rbp != 0 {
+                    labels.push("saved caller %rbp".to_string());
+                } else if address == rbp.wrapping_add(8) && rbp != 0 {
+                    labels.push("frame return address".to_string());
+                } else if let Some(offset) = offset_from_rbp.filter(|offset| *offset < 0) {
+                    labels.push(format!("local {offset}(%rbp)"));
+                }
+                if let Some(location) = self.program.location_for_text_address(value) {
+                    labels.push(format!("return to {}:{}", location.module, location.line));
+                }
+                StackSlotView {
+                    address: hex64(address),
+                    value: hex64(value),
+                    signed: (value as i64).to_string(),
+                    offset_from_rbp,
+                    label: (!labels.is_empty()).then(|| labels.join(" · ")),
+                }
+            })
+            .collect();
+        StackView {
+            base: hex64(active_base),
+            top: hex64(STACK_START),
+            rsp: hex64(rsp),
+            rbp: hex64(rbp),
+            bytes,
+            slots,
+        }
     }
 
     fn reset(&mut self) -> CommandResult {
@@ -120,11 +182,57 @@ impl Session {
         }
         let executed = self.machine.execute(&self.program);
         self.last_explanation = executed.explanation;
-        self.history.push(executed.delta);
-        self.result(1, executed.events, Vec::new())
+        let steps = usize::from(executed.completed);
+        if executed.completed {
+            self.history.push(executed.delta);
+        }
+        self.result(steps, executed.events, Vec::new())
+    }
+
+    fn next(&mut self) -> CommandResult {
+        if !self.machine.status.can_step() || !self.program.current_is_call(self.machine.pc) {
+            return self.step();
+        }
+
+        let return_pc = self.machine.pc + 1;
+        let mut steps = 0;
+        let mut events = Vec::new();
+        const NEXT_LIMIT: usize = 10_000;
+        while self.machine.status.can_step() && steps < NEXT_LIMIT {
+            let executed = self.machine.execute(&self.program);
+            self.last_explanation = executed.explanation;
+            events.extend(executed.events);
+            if !executed.completed {
+                break;
+            }
+            self.history.push(executed.delta);
+            steps += 1;
+            if self.machine.pc == return_pc {
+                self.last_explanation = format!(
+                    "Next stepped over the call and stopped at its return point after {steps} instruction(s)."
+                );
+                break;
+            }
+        }
+        let diagnostics = if self.machine.status.can_step() && self.machine.pc != return_pc {
+            vec![Diagnostic::error(
+                "E304",
+                format!("next stopped after the {NEXT_LIMIT}-instruction safety limit"),
+                None,
+            )]
+        } else {
+            Vec::new()
+        };
+        self.result(steps, events, diagnostics)
     }
 
     fn back(&mut self) -> CommandResult {
+        if self.machine.cancel_input_wait() {
+            self.last_explanation =
+                "Cancelled the blocked read and returned to the same syscall instruction."
+                    .to_string();
+            return self.result(0, Vec::new(), Vec::new());
+        }
         let Some(delta) = self.history.pop() else {
             let diagnostic = Diagnostic::error(
                 "E301",
@@ -144,6 +252,27 @@ impl Session {
         self.result(0, events, Vec::new())
     }
 
+    fn submit_input(&mut self, text: &str) -> CommandResult {
+        match self.machine.submit_input_line(text) {
+            Ok(bytes) => {
+                let escaped = escaped_bytes(&bytes);
+                self.last_explanation = format!(
+                    "Submitted one terminal line (`{escaped}`). A waiting read can now be stepped or continued."
+                );
+                self.result(
+                    0,
+                    vec![StepEvent::InputSubmitted { bytes, escaped }],
+                    Vec::new(),
+                )
+            }
+            Err(message) => self.result(
+                0,
+                Vec::new(),
+                vec![Diagnostic::error("E303", message, None)],
+            ),
+        }
+    }
+
     fn continue_for(&mut self, max_steps: usize) -> CommandResult {
         let max_steps = max_steps.max(1);
         let mut steps = 0;
@@ -151,8 +280,11 @@ impl Session {
         while self.machine.status.can_step() && steps < max_steps {
             let executed = self.machine.execute(&self.program);
             self.last_explanation = executed.explanation;
-            self.history.push(executed.delta);
             events.extend(executed.events);
+            if !executed.completed {
+                break;
+            }
+            self.history.push(executed.delta);
             steps += 1;
         }
         let diagnostics = if self.machine.status.can_step() {

@@ -10,7 +10,13 @@ import type {
   StepEvent
 } from "./types";
 
-type Command = "Reset" | "Step" | "Next" | "Back" | { Continue: { max_steps: number } };
+type Command =
+  | "Reset"
+  | "Step"
+  | "Next"
+  | "Back"
+  | { Continue: { max_steps: number } }
+  | { SubmitInput: { text: string } };
 
 type TutorialStep = {
   title: string;
@@ -19,7 +25,7 @@ type TutorialStep = {
   check: (view: MachineView) => boolean;
 };
 
-type TutorialKind = "registers" | "memory";
+type TutorialKind = "registers" | "memory" | "functions";
 
 const emptyFlags = { cf: false, pf: false, af: false, zf: false, sf: false, of: false };
 
@@ -38,6 +44,7 @@ export default function App() {
   const [tutorialKind, setTutorialKind] = useState<TutorialKind>("registers");
   const [tutorialStep, setTutorialStep] = useState(0);
   const [tutorialFeedback, setTutorialFeedback] = useState<string | null>(null);
+  const [stdinDraft, setStdinDraft] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -72,6 +79,7 @@ export default function App() {
       setProgram(JSON.parse(session.current.program_json()) as ProgramView);
       setResult(null);
       setDiagnostics([]);
+      setStdinDraft("");
     } catch (error: unknown) {
       session.current = null;
       setView(null);
@@ -106,7 +114,7 @@ export default function App() {
   };
 
   const startTutorial = (kind: TutorialKind = "registers") => {
-    const lessonId = kind === "memory" ? "addarray3" : "firstadd";
+    const lessonId = kind === "memory" ? "addarray3" : kind === "functions" ? "funstack" : "firstadd";
     const lesson = lessons.find((candidate) => candidate.id === lessonId);
     if (!lesson) return;
     setSelectedId(lesson.id);
@@ -121,7 +129,7 @@ export default function App() {
 
   const checkTutorial = () => {
     if (!view) return;
-    const steps = tutorialKind === "memory" ? memoryTutorialSteps : registerTutorialSteps;
+    const steps = tutorialSteps(tutorialKind);
     const step = steps[tutorialStep] ?? steps[0]!;
     setTutorialFeedback(
       step.check(view)
@@ -145,13 +153,29 @@ export default function App() {
     if (!view) return offsets;
     for (const event of result?.events ?? []) {
       if (event.kind !== "memory_write" || !event.address || !event.width) continue;
-      const start = Number(BigInt(event.address) - BigInt(view.memory.base));
+      const relative = BigInt(event.address) - BigInt(view.memory.base);
+      if (relative < 0n || relative >= BigInt(view.memory.bytes.length)) continue;
+      const start = Number(relative);
       for (let offset = start; offset < start + event.width / 8; offset += 1) {
         offsets.add(offset);
       }
     }
     return offsets;
   }, [result, view]);
+  const changedStack = useMemo(
+    () =>
+      new Set(
+        (result?.events ?? [])
+          .filter((event) => event.kind === "memory_write" && event.address)
+          .map((event) => event.address as string)
+      ),
+    [result]
+  );
+
+  const submitInput = () => {
+    execute({ SubmitInput: { text: stdinDraft } });
+    setStdinDraft("");
+  };
 
   if (bootError) {
     return <main className="fatal">Could not start x86-63: {bootError}</main>;
@@ -201,13 +225,26 @@ export default function App() {
           >
             Memory tutorial
           </button>
+          <button
+            className="tutorial-trigger functions-tutorial-trigger"
+            onClick={() => startTutorial("functions")}
+            disabled={!lessons.length}
+          >
+            Stack tutorial
+          </button>
           <button onClick={() => loadSession(moduleName, source)} disabled={!lessons.length}>
             Assemble
           </button>
           <button onClick={() => execute("Reset")} disabled={!session.current}>
             Reset
           </button>
-          <button onClick={() => execute("Back")} disabled={!session.current || !view?.history_depth}>
+          <button
+            onClick={() => execute("Back")}
+            disabled={
+              !session.current ||
+              (!view?.history_depth && view?.status.kind !== "waiting_for_input")
+            }
+          >
             ← Back
           </button>
           <button className="primary" onClick={() => execute("Step")} disabled={!canStep(view)}>
@@ -234,14 +271,19 @@ export default function App() {
 
       {tutorialOpen && (
         <Tutorial
-          title={tutorialKind === "memory" ? "Memory and addressing" : "Registers and arithmetic"}
-          steps={tutorialKind === "memory" ? memoryTutorialSteps : registerTutorialSteps}
+          title={
+            tutorialKind === "memory"
+              ? "Memory and addressing"
+              : tutorialKind === "functions"
+                ? "Calls and stack frames"
+                : "Registers and arithmetic"
+          }
+          steps={tutorialSteps(tutorialKind)}
           step={tutorialStep}
           feedback={tutorialFeedback}
           onCheck={checkTutorial}
           onMove={(offset) => {
-            const length =
-              tutorialKind === "memory" ? memoryTutorialSteps.length : registerTutorialSteps.length;
+            const length = tutorialSteps(tutorialKind).length;
             setTutorialStep((current) =>
               Math.max(0, Math.min(length - 1, current + offset))
             );
@@ -307,10 +349,17 @@ export default function App() {
             <MemoryPanel memory={view.memory} changed={changedMemory} />
           )}
 
-          {view &&
-            (view.io.stdout_bytes.length > 0 || view.io.stderr_bytes.length > 0) && (
-              <OutputPanel io={view.io} />
-            )}
+          {view && <StackPanel stack={view.stack} changed={changedStack} />}
+
+          {view && (
+            <ProcessIoPanel
+              io={view.io}
+              value={stdinDraft}
+              onChange={setStdinDraft}
+              onSubmit={submitInput}
+              halted={view.status.kind === "exited" || view.status.kind === "faulted"}
+            />
+          )}
 
           <section className="panel explanation-panel" aria-live="polite">
             <p className="eyebrow">This step</p>
@@ -397,6 +446,13 @@ function EventSummary({ events }: { events: StepEvent[] }) {
       "arithmetic",
       "compare",
       "branch",
+      "call",
+      "return",
+      "stack_push",
+      "stack_pop",
+      "input_requested",
+      "input_submitted",
+      "input_read",
       "output",
       "exit",
       "fault"
@@ -428,6 +484,20 @@ function eventText(event: StepEvent): string {
       return `cmp: ${event.destination} − ${event.source} = ${event.result}`;
     case "branch":
       return `${event.condition} → ${event.target}: ${event.predicate}; ${event.taken ? "taken" : "not taken"}`;
+    case "call":
+      return `call ${event.target}: pushed return address ${event.return_address}`;
+    case "return":
+      return `ret: popped ${event.return_address}${event.return_location ? ` → ${event.return_location.module}:${event.return_location.line}` : ""}`;
+    case "stack_push":
+      return `push ${event.value}; %rsp is now ${event.stack_pointer}`;
+    case "stack_pop":
+      return `pop ${event.value}; %rsp is now ${event.stack_pointer}`;
+    case "input_requested":
+      return `read is waiting for up to ${event.count} bytes of stdin at ${event.address}`;
+    case "input_submitted":
+      return `submitted stdin line: ${event.escaped}`;
+    case "input_read":
+      return `read consumed: ${event.escaped}`;
     case "output":
       return `write(fd=${event.fd}): ${event.escaped}`;
     case "exit":
@@ -450,32 +520,38 @@ function MemoryPanel({
     <section className="panel memory-panel">
       <div className="panel-heading">
         <h2>Memory</h2>
-        <span className="memory-size">.data · {memory.bytes.length} bytes</span>
+        <span className="memory-size">mapped data · {memory.bytes.length} bytes</span>
       </div>
       <div className="memory-symbols">
         {memory.symbols.map((symbol) => {
           const bytes = memory.bytes.slice(symbol.offset, symbol.offset + symbol.size);
-          const elements = chunk(bytes, symbol.element_width);
+          const compactByteBuffer = symbol.element_width === 1 && symbol.size > 32;
+          const displayWidth = compactByteBuffer ? 8 : symbol.element_width;
+          const elements = chunk(bytes, displayWidth);
+          const elementCount = Math.ceil(symbol.size / symbol.element_width);
           return (
             <section className="memory-symbol" key={symbol.name}>
               <header>
                 <strong>{symbol.name}</strong>
                 <code>{symbol.address}</code>
                 <small>
-                  {directiveName(symbol.element_width)} × {elements.length}
+                  {symbol.section} · {directiveName(symbol.element_width)} × {elementCount}
                 </small>
               </header>
               <div className="memory-elements">
                 {elements.map((element, index) => {
-                  const offset = symbol.offset + index * symbol.element_width;
+                  const byteOffset = index * displayWidth;
+                  const offset = symbol.offset + byteOffset;
                   const isChanged = element.some((_, byte) => changed.has(offset + byte));
                   return (
                     <div className={`memory-element ${isChanged ? "changed" : ""}`} key={offset}>
                       <small>
-                        [{index}] {addressAt(memory.base, offset)}
+                        {compactByteBuffer ? `[+${byteOffset}]` : `[${index}]`} {addressAt(memory.base, offset)}
                       </small>
                       <code>{element.map(hexByte).join(" ")}</code>
-                      <strong>{littleEndianSigned(element)}</strong>
+                      <strong>
+                        {compactByteBuffer ? `text “${renderBytes(element)}”` : littleEndianSigned(element)}
+                      </strong>
                     </div>
                   );
                 })}
@@ -488,13 +564,84 @@ function MemoryPanel({
   );
 }
 
-function OutputPanel({ io }: { io: MachineView["io"] }) {
+function StackPanel({
+  stack,
+  changed
+}: {
+  stack: MachineView["stack"];
+  changed: Set<string>;
+}) {
+  return (
+    <section className="panel stack-panel">
+      <div className="panel-heading">
+        <h2>Stack</h2>
+        <span className="memory-size">
+          %rsp {stack.rsp} · %rbp {stack.rbp}
+        </span>
+      </div>
+      {stack.slots.length === 0 ? (
+        <p className="empty-state">The stack is empty at its initial aligned top, {stack.top}.</p>
+      ) : (
+        <div className="stack-slots">
+          {stack.slots.map((slot) => (
+            <div
+              className={`stack-slot ${changed.has(slot.address) ? "changed" : ""}`}
+              key={slot.address}
+            >
+              <code>{slot.address}</code>
+              <strong>{slot.value}</strong>
+              <small>{slot.label ?? `signed ${slot.signed}`}</small>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ProcessIoPanel({
+  io,
+  value,
+  onChange,
+  onSubmit,
+  halted
+}: {
+  io: MachineView["io"];
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  halted: boolean;
+}) {
   return (
     <section className="panel output-panel">
       <div className="panel-heading">
-        <h2>Process output</h2>
-        <span className="memory-size">exact bytes stay visible</span>
+        <h2>Process I/O</h2>
+        <span className="memory-size">input is submitted one line at a time</span>
       </div>
+      <form
+        className="stdin-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSubmit();
+        }}
+      >
+        <label htmlFor="stdin-line">stdin line</label>
+        <input
+          id="stdin-line"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          disabled={halted}
+          placeholder="for example: hello"
+        />
+        <button type="submit" disabled={halted}>Submit line</button>
+      </form>
+      {io.stdin_bytes.length > 0 && (
+        <div className="output-stream input-stream">
+          <strong>stdin · {io.stdin_consumed}/{io.stdin_bytes.length} bytes consumed</strong>
+          <pre>{renderBytes(io.stdin_bytes)}</pre>
+          <code>{io.stdin_escaped}</code>
+        </div>
+      )}
       {io.stdout_bytes.length > 0 && (
         <div className="output-stream">
           <strong>stdout</strong>
@@ -576,6 +723,9 @@ function Diagnostics({ diagnostics }: { diagnostics: Diagnostic[] }) {
 function StatusBadge({ status }: { status: MachineStatus | undefined }) {
   if (!status) return <span className="status">loading</span>;
   if (status.kind === "paused") return <span className="status paused">paused</span>;
+  if (status.kind === "waiting_for_input") {
+    return <span className="status waiting">waiting for stdin</span>;
+  }
   if (status.kind === "exited") {
     return <span className="status exited">exited · shell {status.shell_status}</span>;
   }
@@ -619,6 +769,17 @@ function memoryUnsigned(view: MachineView, symbolName: string, index: number): s
     value |= BigInt(byte) << BigInt(byteIndex * 8);
   });
   return value.toString();
+}
+
+function stackUnsigned(view: MachineView, offsetFromRbp: number): string | undefined {
+  const slot = view.stack.slots.find((candidate) => candidate.offset_from_rbp === offsetFromRbp);
+  return slot ? BigInt(slot.value).toString() : undefined;
+}
+
+function tutorialSteps(kind: TutorialKind): TutorialStep[] {
+  if (kind === "memory") return memoryTutorialSteps;
+  if (kind === "functions") return functionTutorialSteps;
+  return registerTutorialSteps;
 }
 
 const registerTutorialSteps: TutorialStep[] = [
@@ -787,5 +948,110 @@ const memoryTutorialSteps: TutorialStep[] = [
       view.status.shell_status === 54 &&
       registerUnsigned(view, "rdi") === "310" &&
       memoryUnsigned(view, "num", 1) === "310"
+  }
+];
+
+const functionTutorialSteps: TutorialStep[] = [
+  {
+    title: "Begin at the caller",
+    instruction:
+      "Find `_start` and the highlighted `mov $10,%rdi`. The function body appears earlier in the file, but execution begins at `_start`.",
+    expected: "Line 19 should be next, the stack should be empty, and %rsp should equal the stack top.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 0 &&
+      view.next_instruction?.line === 19 &&
+      view.stack.slots.length === 0 &&
+      view.stack.rsp === view.stack.top
+  },
+  {
+    title: "Place the argument",
+    instruction: "Click Step. The System V calling convention puts this first integer argument in %rdi.",
+    expected: "%rdi should contain 10 and the call on line 20 should be next.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 1 &&
+      registerUnsigned(view, "rdi") === "10" &&
+      view.next_instruction?.line === 20
+  },
+  {
+    title: "Step into call",
+    instruction:
+      "Click Step—not Next—on `call fun`. Watch %rsp move down eight bytes and inspect the new return-address slot.",
+    expected: "Execution should enter line 6 with one stack slot labeled as the return to line 21.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 2 &&
+      view.next_instruction?.line === 6 &&
+      view.stack.slots.length === 1 &&
+      (view.stack.slots[0]?.label?.includes("return to funStack.s:21") ?? false)
+  },
+  {
+    title: "Save the caller's frame pointer",
+    instruction: "Step over `push %rbp`. This is a real eight-byte memory write below the return address.",
+    expected: "There should be two active stack slots and line 7 should be next.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 3 &&
+      view.next_instruction?.line === 7 &&
+      view.stack.slots.length === 2
+  },
+  {
+    title: "Anchor the new frame",
+    instruction:
+      "Step over `mov %rsp,%rbp`. %rbp now stays fixed while %rsp can move to reserve locals.",
+    expected: "%rbp and %rsp should match, and the saved caller %rbp slot should be labeled.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 4 &&
+      registerUnsigned(view, "rbp") === registerUnsigned(view, "rsp") &&
+      view.stack.slots.some((slot) => slot.label?.includes("saved caller %rbp"))
+  },
+  {
+    title: "Reserve two local quadwords",
+    instruction:
+      "Step over `sub $16,%rsp`. The stack grows downward, so two new zeroed slots appear at -16(%rbp) and -8(%rbp).",
+    expected: "Four slots should be active, including offsets -16 and -8 from %rbp.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 5 &&
+      view.next_instruction?.line === 9 &&
+      view.stack.slots.length === 4 &&
+      stackUnsigned(view, -16) === "0" &&
+      stackUnsigned(view, -8) === "0"
+  },
+  {
+    title: "Write the locals",
+    instruction:
+      "Click Step three times. The first local becomes 2×10 and the second receives the constant 20.",
+    expected: "Both -16(%rbp) and -8(%rbp) should contain 20, with line 12 next.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 8 &&
+      view.next_instruction?.line === 12 &&
+      stackUnsigned(view, -16) === "20" &&
+      stackUnsigned(view, -8) === "20"
+  },
+  {
+    title: "Reverse a local write",
+    instruction: "Click Back once. Reverse execution restores the actual eight stack bytes at -16(%rbp).",
+    expected: "The -16 local should return to 0 while the -8 local remains 20.",
+    check: (view) =>
+      view.status.kind === "paused" &&
+      view.history_depth === 7 &&
+      stackUnsigned(view, -16) === "0" &&
+      stackUnsigned(view, -8) === "20"
+  },
+  {
+    title: "Tear the frame down",
+    instruction:
+      "Step once to replay the write, then click Run. The epilogue restores %rsp and %rbp; ret consumes the return address.",
+    expected: "The program should exit with 40 and the active stack should be empty again.",
+    check: (view) =>
+      view.status.kind === "exited" &&
+      view.status.shell_status === 40 &&
+      registerUnsigned(view, "rdi") === "40" &&
+      view.stack.slots.length === 0 &&
+      view.stack.rsp === view.stack.top
   }
 ];

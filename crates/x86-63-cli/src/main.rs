@@ -49,6 +49,10 @@ struct Input {
     /// Maximum instructions for run/continue.
     #[arg(long, default_value_t = 10_000)]
     max_steps: usize,
+
+    /// Queue one line of stdin before execution (repeatable).
+    #[arg(long = "stdin", value_name = "LINE")]
+    stdin: Vec<String>,
 }
 
 impl Default for Input {
@@ -57,6 +61,7 @@ impl Default for Input {
             files: Vec::new(),
             example: Some("firstadd".to_string()),
             max_steps: 10_000,
+            stdin: Vec::new(),
         }
     }
 }
@@ -105,6 +110,7 @@ fn try_main() -> Result<(), String> {
             display::print_result(&result);
             display::print_registers(&result.view);
             display::print_memory(&result.view);
+            display::print_stack(&result.view);
             display::print_output(&result.view);
             Ok(())
         }
@@ -134,10 +140,18 @@ fn try_main() -> Result<(), String> {
 }
 
 fn build_session(input: &Input) -> Result<Session, String> {
-    Session::from_modules(load_modules(input)?).map_err(|error| {
+    let mut session = Session::from_modules(load_modules(input)?).map_err(|error| {
         display::print_diagnostics(&error.diagnostics);
         error.to_string()
-    })
+    })?;
+    for line in &input.stdin {
+        let result = session.execute(Command::SubmitInput { text: line.clone() });
+        if !result.diagnostics.is_empty() {
+            display::print_diagnostics(&result.diagnostics);
+            return Err("could not queue stdin".to_string());
+        }
+    }
+    Ok(session)
 }
 
 fn load_modules(input: &Input) -> Result<Vec<SourceModule>, String> {

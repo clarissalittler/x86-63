@@ -4,11 +4,30 @@ use crate::diagnostic::Diagnostic;
 use crate::machine::{JumpCondition, MemoryAddress, Operand, Operation, RegisterRef};
 use crate::program::{DATA_BASE, Instruction, Program, SourceLocation, SourceModule};
 
+const MAX_DATA_BYTES: usize = 64 * 1024;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Section {
     Text,
     Data,
+    Bss,
+    Rodata,
     Other,
+}
+
+impl Section {
+    fn data_name(self) -> Option<&'static str> {
+        match self {
+            Self::Data => Some(".data"),
+            Self::Bss => Some(".bss"),
+            Self::Rodata => Some(".rodata"),
+            Self::Text | Self::Other => None,
+        }
+    }
+
+    fn is_data(self) -> bool {
+        self.data_name().is_some()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -30,6 +49,7 @@ pub fn compile(modules: Vec<SourceModule>) -> Result<Program, Vec<Diagnostic>> {
     let mut labels = BTreeMap::new();
     let mut data_symbols = BTreeMap::new();
     let mut data_symbol_widths = BTreeMap::new();
+    let mut data_symbol_sections = BTreeMap::new();
     let mut constants = BTreeMap::new();
     let mut initial_data = Vec::new();
     let mut diagnostics = Vec::new();
@@ -59,6 +79,7 @@ pub fn compile(modules: Vec<SourceModule>) -> Result<Program, Vec<Diagnostic>> {
                     &location,
                     &mut labels,
                     &mut data_symbols,
+                    &mut data_symbol_sections,
                     &constants,
                     &mut diagnostics,
                 );
@@ -173,6 +194,7 @@ pub fn compile(modules: Vec<SourceModule>) -> Result<Program, Vec<Diagnostic>> {
             labels,
             data_symbols,
             data_symbol_widths,
+            data_symbol_sections,
             constants,
             initial_data,
             entry,
@@ -184,7 +206,7 @@ pub fn compile(modules: Vec<SourceModule>) -> Result<Program, Vec<Diagnostic>> {
 
 fn directive_element_width(code: &str) -> Option<usize> {
     match code.split_whitespace().next()? {
-        ".byte" | ".ascii" | ".asciz" => Some(1),
+        ".byte" | ".ascii" | ".asciz" | ".skip" | ".zero" | ".space" => Some(1),
         ".word" => Some(2),
         ".long" => Some(4),
         ".quad" => Some(8),
@@ -201,6 +223,7 @@ fn define_label(
     location: &SourceLocation,
     labels: &mut BTreeMap<String, usize>,
     data_symbols: &mut BTreeMap<String, u64>,
+    data_symbol_sections: &mut BTreeMap<String, String>,
     constants: &BTreeMap<String, u64>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -223,8 +246,12 @@ fn define_label(
         Some(Section::Text) => {
             labels.insert(label.to_string(), instruction_index);
         }
-        Some(Section::Data) => {
+        Some(section) if section.is_data() => {
             data_symbols.insert(label.to_string(), DATA_BASE + data_offset as u64);
+            data_symbol_sections.insert(
+                label.to_string(),
+                section.data_name().expect("data section").to_string(),
+            );
         }
         _ => diagnostics.push(
             Diagnostic::error(
@@ -232,7 +259,7 @@ fn define_label(
                 format!("symbol `{label}` is defined outside a supported section"),
                 Some(location.clone()),
             )
-            .with_help("place code labels in .text and data labels in .data"),
+            .with_help("place code labels in .text and data labels in .data, .bss, or .rodata"),
         ),
     }
 }
@@ -259,7 +286,9 @@ fn define_equate(
         return;
     }
 
-    let current = (section == Some(Section::Data)).then_some(DATA_BASE + data_offset as u64);
+    let current = section
+        .is_some_and(Section::is_data)
+        .then_some(DATA_BASE + data_offset as u64);
     match parse_equate_expression(expression, current, data_symbols, constants) {
         Ok(value) => {
             constants.insert(name.to_string(), value);
@@ -351,18 +380,22 @@ fn parse_directive(
     match directive {
         ".text" => *section = Some(Section::Text),
         ".data" => *section = Some(Section::Data),
+        ".bss" => *section = Some(Section::Bss),
+        ".rodata" => *section = Some(Section::Rodata),
         ".section" => match arguments.split_whitespace().next() {
             Some(".text") => *section = Some(Section::Text),
             Some(".data") => *section = Some(Section::Data),
+            Some(".bss") => *section = Some(Section::Bss),
+            Some(".rodata") => *section = Some(Section::Rodata),
             Some(name) => {
                 *section = Some(Section::Other);
                 diagnostics.push(
                     Diagnostic::error(
                         "E133",
-                        format!("section `{name}` is not in the Lecture 4 slice yet"),
+                        format!("section `{name}` is not in the Lecture 5 slice yet"),
                         Some(location.clone()),
                     )
-                    .with_help("currently supported sections are .text and .data"),
+                    .with_help("currently supported sections are .text, .data, .bss, and .rodata"),
                 );
             }
             None => diagnostics.push(
@@ -371,7 +404,7 @@ fn parse_directive(
                     "`.section` needs a section name",
                     Some(location.clone()),
                 )
-                .with_help("write `.section .text` or `.section .data`"),
+                .with_help("write `.section .text`, `.section .data`, or `.section .bss`"),
             ),
         },
         ".global" | ".globl" => {
@@ -388,10 +421,10 @@ fn parse_directive(
         ".long" => parse_integer_data(arguments, 4, *section, data, location, diagnostics),
         ".quad" => parse_integer_data(arguments, 8, *section, data, location, diagnostics),
         ".ascii" | ".asciz" => {
-            if *section != Some(Section::Data) {
+            if !section.is_some_and(Section::is_data) || *section == Some(Section::Bss) {
                 diagnostics.push(Diagnostic::error(
                     "E134",
-                    format!("`{directive}` appears outside .data"),
+                    format!("`{directive}` needs an initialized data section"),
                     Some(location.clone()),
                 ));
                 return;
@@ -410,17 +443,56 @@ fn parse_directive(
                 )),
             }
         }
+        ".skip" | ".zero" | ".space" => {
+            if *section != Some(Section::Bss) {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E134",
+                        format!("`{directive}` appears outside .bss"),
+                        Some(location.clone()),
+                    )
+                    .with_help("put zero-initialized storage after `.section .bss`"),
+                );
+                return;
+            }
+            match parse_storage_size(arguments, data.len()) {
+                Ok(new_len) => data.resize(new_len, 0),
+                Err(message) => diagnostics.push(Diagnostic::error(
+                    "E143",
+                    message,
+                    Some(location.clone()),
+                )),
+            }
+        }
         _ => diagnostics.push(
             Diagnostic::error(
                 "E132",
-                format!("directive `{directive}` is not in the Lecture 4 slice yet"),
+                format!("directive `{directive}` is not in the Lecture 5 slice yet"),
                 Some(location.clone()),
             )
             .with_help(
-                "supported directives are .text/.data/.section, .global/.globl, integer data, and .ascii/.asciz",
+                "supported directives include .text/.data/.bss/.rodata, .global/.globl, integer/string data, and .skip/.zero",
             ),
         ),
     }
+}
+
+fn parse_storage_size(text: &str, current_size: usize) -> Result<usize, String> {
+    let text = text.trim();
+    if text.starts_with('-') {
+        return Err(format!("storage size `{text}` must not be negative"));
+    }
+    let size = usize::try_from(parse_immediate(text)?)
+        .map_err(|_| format!("storage size `{text}` does not fit usize"))?;
+    let new_size = current_size
+        .checked_add(size)
+        .ok_or_else(|| format!("storage size `{text}` overflows the data region"))?;
+    if new_size > MAX_DATA_BYTES {
+        return Err(format!(
+            "data region would be {new_size} bytes; this teaching machine limits it to {MAX_DATA_BYTES} bytes"
+        ));
+    }
+    Ok(new_size)
 }
 
 fn parse_integer_data(
@@ -431,10 +503,10 @@ fn parse_integer_data(
     location: &SourceLocation,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if section != Some(Section::Data) {
+    if !section.is_some_and(Section::is_data) || section == Some(Section::Bss) {
         diagnostics.push(Diagnostic::error(
             "E134",
-            "initialized data directive appears outside .data",
+            "initialized data directive needs .data or .rodata",
             Some(location.clone()),
         ));
         return;
@@ -512,6 +584,54 @@ fn parse_instruction(
         ));
     }
 
+    if matches!(mnemonic.as_str(), "ret" | "retq") {
+        if operands.is_empty() {
+            return Ok(Operation::Ret);
+        }
+        return Err(Diagnostic::error(
+            "E224",
+            "`ret` does not take an explicit operand",
+            Some(location),
+        ));
+    }
+
+    if matches!(mnemonic.as_str(), "call" | "callq") {
+        let target_label = one_operand(operands, &mnemonic, &location)?;
+        let target = labels.get(target_label).copied().ok_or_else(|| {
+            Diagnostic::error(
+                "E219",
+                format!("call target `{target_label}` is not a .text label"),
+                Some(location.clone()),
+            )
+            .with_help("define the function with a label in the .text section")
+        })?;
+        return Ok(Operation::Call {
+            target,
+            target_label: target_label.to_string(),
+        });
+    }
+
+    if matches!(mnemonic.as_str(), "push" | "pushq") {
+        let operand_text = one_operand(operands, &mnemonic, &location)?;
+        let source = parse_operand(operand_text, data_symbols, constants, &location, false)?;
+        validate_operand_width(&source, 64, &mnemonic, &location)?;
+        return Ok(Operation::Push { source });
+    }
+
+    if matches!(mnemonic.as_str(), "pop" | "popq") {
+        let operand_text = one_operand(operands, &mnemonic, &location)?;
+        let destination = parse_operand(operand_text, data_symbols, constants, &location, true)?;
+        if matches!(destination, Operand::Immediate(_)) {
+            return Err(Diagnostic::error(
+                "E215",
+                "pop destination cannot be an immediate value",
+                Some(location),
+            ));
+        }
+        validate_operand_width(&destination, 64, &mnemonic, &location)?;
+        return Ok(Operation::Pop { destination });
+    }
+
     if let Some(condition) = parse_jump(&mnemonic) {
         if operands.is_empty() || operands.contains(',') {
             return Err(Diagnostic::error(
@@ -538,11 +658,11 @@ fn parse_instruction(
     let (family, explicit_width) = parse_family(&mnemonic).ok_or_else(|| {
         Diagnostic::error(
             "E202",
-            format!("instruction `{mnemonic}` is not in the Lecture 4 slice yet"),
+            format!("instruction `{mnemonic}` is not in the Lecture 5 slice yet"),
             Some(location.clone()),
         )
         .with_help(
-            "currently supported families are mov, lea, add, sub, xor, cmp, jumps, and syscall",
+            "currently supported families are mov, lea, add, sub, xor, cmp, jumps, call/ret, push/pop, and syscall",
         )
     })?;
 
@@ -636,6 +756,21 @@ fn parse_instruction(
         },
         Family::Lea => unreachable!("handled above"),
     })
+}
+
+fn one_operand<'a>(
+    operands: &'a str,
+    mnemonic: &str,
+    location: &SourceLocation,
+) -> Result<&'a str, Diagnostic> {
+    if operands.is_empty() || operands.contains(',') {
+        return Err(Diagnostic::error(
+            "E224",
+            format!("`{mnemonic}` needs exactly one operand"),
+            Some(location.clone()),
+        ));
+    }
+    Ok(operands.trim())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1021,6 +1156,31 @@ mod tests {
         assert_eq!(&program.initial_data[8..], &[b'A', b'\n', 0]);
         assert_eq!(program.constants["len"], 3);
         assert_eq!(program.data_symbols["num"], DATA_BASE);
+    }
+
+    #[test]
+    fn lays_out_bss_and_rejects_dangerous_storage_sizes() {
+        let program = compile(module(
+            ".data\nhead: .byte 7\n.bss\nbuff: .skip 16\n.text\n.global _start\n_start:\n mov $60,%rax\n syscall\n",
+        ))
+        .unwrap();
+        assert_eq!(program.initial_data.len(), 17);
+        assert_eq!(program.initial_data[0], 7);
+        assert_eq!(&program.initial_data[1..], &[0; 16]);
+        assert_eq!(program.data_symbol_sections["buff"], ".bss");
+
+        for size in ["-1", "65537", "18446744073709551615"] {
+            let source = format!(
+                ".bss\nbuff: .skip {size}\n.text\n.global _start\n_start:\n mov $60,%rax\n syscall\n"
+            );
+            let diagnostics = compile(module(&source)).unwrap_err();
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "E143"),
+                "{size} should produce a bounded-storage diagnostic"
+            );
+        }
     }
 
     #[test]

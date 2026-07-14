@@ -12,7 +12,7 @@ pub struct Lesson {
 }
 
 pub fn lessons() -> &'static [Lesson] {
-    static LESSONS: [Lesson; 15] = [
+    static LESSONS: [Lesson; 21] = [
         Lesson {
             id: "first",
             title: "The deliberately incomplete program",
@@ -147,6 +147,60 @@ pub fn lessons() -> &'static [Lesson] {
             prediction: "Does `hellolen` include the newline and the terminating NUL byte?",
             module_name: "hello.s",
             source: include_str!("../../../course-content/lecture4/hello.s"),
+        },
+        Lesson {
+            id: "echo",
+            title: "Read blocks, then returns a byte count",
+            lecture: 5,
+            summary: "Read one terminal line into .bss and write exactly the returned bytes back.",
+            prediction: "What can the read syscall put in %rax before the program knows how many bytes to write?",
+            module_name: "echo.s",
+            source: include_str!("../../../course-content/lecture5/echo.s"),
+        },
+        Lesson {
+            id: "helloret",
+            title: "A syscall has a return value too",
+            lecture: 5,
+            summary: "Use write's returned byte count as the eventual process status.",
+            prediction: "How many bytes does write return when the string includes newline and NUL?",
+            module_name: "helloRet.s",
+            source: include_str!("../../../course-content/lecture5/helloRet.s"),
+        },
+        Lesson {
+            id: "routine",
+            title: "The hard-coded way back from a routine",
+            lecture: 5,
+            summary: "Jump into a routine and discover why a fixed return label does not compose.",
+            prediction: "Where is the return destination recorded when both transfers are plain jmp instructions?",
+            module_name: "routine.s",
+            source: include_str!("../../../course-content/lecture5/routine.s"),
+        },
+        Lesson {
+            id: "fun1",
+            title: "call, ret, and a clobbered argument",
+            lecture: 5,
+            summary: "Watch call push a return address and see a function overwrite %rdi.",
+            prediction: "Why does the second call double 40 instead of the original 20?",
+            module_name: "fun1.s",
+            source: include_str!("../../../course-content/lecture5/fun1.s"),
+        },
+        Lesson {
+            id: "fun2",
+            title: "Preserving the value changes the answer",
+            lecture: 5,
+            summary: "Keep %rdi intact while computing through %r9, then compare with fun1.",
+            prediction: "The second call still receives %rdi=20; what result will it return?",
+            module_name: "fun2.s",
+            source: include_str!("../../../course-content/lecture5/fun2.s"),
+        },
+        Lesson {
+            id: "funstack",
+            title: "A frame with two local quadwords",
+            lecture: 5,
+            summary: "Build and tear down a real frame containing a return address, saved %rbp, and locals.",
+            prediction: "After subtracting 16 from %rsp, where are -8(%rbp) and -16(%rbp)?",
+            module_name: "funStack.s",
+            source: include_str!("../../../course-content/lecture5/funStack.s"),
         },
     ];
     &LESSONS

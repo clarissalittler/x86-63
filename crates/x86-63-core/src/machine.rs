@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::program::{DATA_BASE, Instruction, Program, SourceLocation};
 use crate::protocol::{FlagsView, StepEvent, escaped_bytes, hex64};
 
-const STACK_START: u64 = 0x0000_7fff_ffff_e000;
+pub(crate) const STACK_START: u64 = 0x0000_7fff_ffff_e000;
+pub(crate) const STACK_SIZE: usize = 16 * 1024;
+pub(crate) const STACK_BASE: u64 = STACK_START - STACK_SIZE as u64;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Flags {
@@ -21,6 +23,11 @@ pub struct Flags {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MachineStatus {
     Paused,
+    WaitingForInput {
+        fd: u64,
+        address: String,
+        count: usize,
+    },
     Exited {
         raw_hex: String,
         signed: String,
@@ -306,6 +313,17 @@ pub(crate) enum Operation {
         target: usize,
         target_label: String,
     },
+    Call {
+        target: usize,
+        target_label: String,
+    },
+    Ret,
+    Push {
+        source: Operand,
+    },
+    Pop {
+        destination: Operand,
+    },
     Syscall,
 }
 
@@ -356,6 +374,9 @@ pub(crate) struct Machine {
     pub(crate) pc: usize,
     pub(crate) status: MachineStatus,
     pub(crate) memory: Vec<u8>,
+    pub(crate) stack: Vec<u8>,
+    pub(crate) stdin: Vec<u8>,
+    pub(crate) stdin_cursor: usize,
     pub(crate) stdout: Vec<u8>,
     pub(crate) stderr: Vec<u8>,
     data_symbols: BTreeMap<String, u64>,
@@ -369,6 +390,9 @@ impl Machine {
             pc: program.entry(),
             status: MachineStatus::Paused,
             memory: program.initial_data().to_vec(),
+            stack: vec![0; STACK_SIZE],
+            stdin: Vec::new(),
+            stdin_cursor: 0,
             stdout: Vec::new(),
             stderr: Vec::new(),
             data_symbols: program.data_symbols.clone(),
@@ -385,6 +409,7 @@ impl Machine {
         let before_flags = self.flags;
         let stdout_len_before = self.stdout.len();
         let stderr_len_before = self.stderr.len();
+        let stdin_cursor_before = self.stdin_cursor;
         let mut register_writes = Vec::new();
         let mut memory_writes = Vec::new();
         let mut events = vec![StepEvent::Instruction {
@@ -394,6 +419,7 @@ impl Machine {
 
         self.pc += 1;
         let explanation = match self.apply_instruction(
+            program,
             &instruction,
             &mut register_writes,
             &mut memory_writes,
@@ -438,16 +464,21 @@ impl Machine {
             memory_writes,
             stdout_len_before,
             stderr_len_before,
+            stdin_cursor_before,
+            stdin_cursor_after: self.stdin_cursor,
         };
+        let completed = !matches!(self.status, MachineStatus::WaitingForInput { .. });
         ExecutedStep {
             delta,
             events,
             explanation,
+            completed,
         }
     }
 
     fn apply_instruction(
         &mut self,
+        program: &Program,
         instruction: &Instruction,
         register_writes: &mut Vec<RegisterWriteDelta>,
         memory_writes: &mut Vec<MemoryWriteDelta>,
@@ -536,7 +567,54 @@ impl Machine {
                 target,
                 target_label,
             } => Ok(self.apply_jump(*condition, *target, target_label, events)),
-            Operation::Syscall => self.apply_syscall(register_writes, events),
+            Operation::Call {
+                target,
+                target_label,
+            } => self.apply_call(
+                program,
+                *target,
+                target_label,
+                register_writes,
+                memory_writes,
+                events,
+            ),
+            Operation::Ret => self.apply_ret(program, register_writes, memory_writes, events),
+            Operation::Push { source } => {
+                let value = self.read_operand(source, 64, events)?;
+                let stack_pointer =
+                    self.push_value(value, register_writes, memory_writes, events)?;
+                events.push(StepEvent::StackPush {
+                    value: hex64(value),
+                    stack_pointer: hex64(stack_pointer),
+                });
+                Ok(format!(
+                    "push stored {} on the stack and moved %rsp down by 8 bytes to {}.",
+                    hex64(value),
+                    hex64(stack_pointer)
+                ))
+            }
+            Operation::Pop { destination } => {
+                let (value, stack_pointer) =
+                    self.pop_value(register_writes, memory_writes, events)?;
+                self.write_operand(
+                    destination,
+                    value,
+                    64,
+                    register_writes,
+                    memory_writes,
+                    events,
+                )?;
+                events.push(StepEvent::StackPop {
+                    value: hex64(value),
+                    stack_pointer: hex64(stack_pointer),
+                });
+                Ok(format!(
+                    "pop loaded {} from the stack into {} and moved %rsp up by 8 bytes.",
+                    hex64(value),
+                    operand_name(destination)
+                ))
+            }
+            Operation::Syscall => self.apply_syscall(register_writes, memory_writes, events),
         }
     }
 
@@ -752,9 +830,119 @@ impl Machine {
         )
     }
 
+    fn apply_call(
+        &mut self,
+        program: &Program,
+        target: usize,
+        target_label: &str,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        memory_writes: &mut Vec<MemoryWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<String, RuntimeFault> {
+        let return_address = program.text_address(self.pc);
+        let stack_pointer =
+            self.push_value(return_address, register_writes, memory_writes, events)?;
+        let return_location = program
+            .instruction(self.pc)
+            .map(|instruction| instruction.location.clone());
+        self.pc = target;
+        events.push(StepEvent::Call {
+            target: target_label.to_string(),
+            return_address: hex64(return_address),
+            return_location,
+        });
+        Ok(format!(
+            "call pushed the return address {} at {} and transferred control to `{target_label}`.",
+            hex64(return_address),
+            hex64(stack_pointer)
+        ))
+    }
+
+    fn apply_ret(
+        &mut self,
+        program: &Program,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        memory_writes: &mut Vec<MemoryWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<String, RuntimeFault> {
+        let (return_address, _) = self.pop_value(register_writes, memory_writes, events)?;
+        let Some(target) = program.instruction_index_for_address(return_address) else {
+            return Err(RuntimeFault::new(
+                "invalid_return_address",
+                format!(
+                    "ret popped {}, which is not a return address in this source-level program",
+                    hex64(return_address)
+                ),
+            ));
+        };
+        let location = program
+            .instruction(target)
+            .map(|instruction| instruction.location.clone());
+        self.pc = target;
+        events.push(StepEvent::Return {
+            return_address: hex64(return_address),
+            return_location: location,
+        });
+        Ok(format!(
+            "ret popped {} from the stack and resumed at the instruction after call.",
+            hex64(return_address)
+        ))
+    }
+
+    fn push_value(
+        &mut self,
+        value: u64,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        memory_writes: &mut Vec<MemoryWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<u64, RuntimeFault> {
+        let rsp = RegisterRef::parse("rsp").unwrap();
+        let before = self.registers.read(rsp);
+        let after = before.checked_sub(8).ok_or_else(|| {
+            RuntimeFault::new("stack_overflow", "push underflowed the stack pointer")
+        })?;
+        self.mapped_range(after, 8)?;
+        self.write_register(rsp, after, register_writes, events);
+        self.write_bytes(after, &value.to_le_bytes(), memory_writes, events)?;
+        Ok(after)
+    }
+
+    fn pop_value(
+        &mut self,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        _memory_writes: &mut Vec<MemoryWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<(u64, u64), RuntimeFault> {
+        let rsp = RegisterRef::parse("rsp").unwrap();
+        let before = self.registers.read(rsp);
+        let bytes = self.read_bytes(before, 8)?;
+        let value = u64::from_le_bytes(bytes.try_into().expect("eight stack bytes"));
+        events.push(StepEvent::MemoryRead {
+            address: hex64(before),
+            value: hex64(value),
+            width: 64,
+            symbol: None,
+        });
+        let after = before.checked_add(8).ok_or_else(|| {
+            RuntimeFault::new("stack_underflow", "pop overflowed the stack pointer")
+        })?;
+        if after > STACK_START {
+            return Err(RuntimeFault::new(
+                "stack_underflow",
+                format!(
+                    "pop tried to move %rsp above the initial stack top {}",
+                    hex64(STACK_START)
+                ),
+            ));
+        }
+        self.write_register(rsp, after, register_writes, events);
+        Ok((value, after))
+    }
+
     fn apply_syscall(
         &mut self,
         register_writes: &mut Vec<RegisterWriteDelta>,
+        memory_writes: &mut Vec<MemoryWriteDelta>,
         events: &mut Vec<StepEvent>,
     ) -> Result<String, RuntimeFault> {
         let rax = RegisterRef::parse("rax").unwrap();
@@ -763,12 +951,64 @@ impl Machine {
         events.push(StepEvent::Syscall {
             number: number.to_string(),
             name: match number {
+                0 => Some("read".to_string()),
                 1 => Some("write".to_string()),
                 60 => Some("exit".to_string()),
                 _ => None,
             },
         });
         match number {
+            0 => {
+                let rsi = RegisterRef::parse("rsi").unwrap();
+                let rdx = RegisterRef::parse("rdx").unwrap();
+                let fd = self.read_register(rdi, events);
+                let address = self.read_register(rsi, events);
+                let count = usize::try_from(self.read_register(rdx, events)).map_err(|_| {
+                    RuntimeFault::new("invalid_read_count", "read byte count does not fit usize")
+                })?;
+                if fd != 0 {
+                    return Err(RuntimeFault::new(
+                        "bad_file_descriptor",
+                        format!(
+                            "read uses file descriptor {fd}; this teaching process exposes stdin as 0"
+                        ),
+                    ));
+                }
+                self.mapped_range(address, count)?;
+                let available = self.stdin.len().saturating_sub(self.stdin_cursor);
+                if count > 0 && available == 0 {
+                    self.pc = self.pc.saturating_sub(1);
+                    self.status = MachineStatus::WaitingForInput {
+                        fd,
+                        address: hex64(address),
+                        count,
+                    };
+                    events.push(StepEvent::InputRequested {
+                        fd,
+                        address: hex64(address),
+                        count,
+                    });
+                    return Ok(format!(
+                        "syscall 0 is read. It is waiting for a line of stdin before it can write up to {count} bytes at {}.",
+                        hex64(address)
+                    ));
+                }
+                let read_count = count.min(available);
+                let bytes = self.stdin[self.stdin_cursor..self.stdin_cursor + read_count].to_vec();
+                self.write_bytes(address, &bytes, memory_writes, events)?;
+                self.stdin_cursor += read_count;
+                let escaped = escaped_bytes(&bytes);
+                events.push(StepEvent::InputRead {
+                    fd,
+                    bytes,
+                    escaped: escaped.clone(),
+                });
+                self.write_register(rax, read_count as u64, register_writes, events);
+                Ok(format!(
+                    "syscall 0 is read. It copied {read_count} byte(s) of stdin (`{escaped}`) to {} and returned {read_count} in %rax.",
+                    hex64(address)
+                ))
+            }
             1 => {
                 let rsi = RegisterRef::parse("rsi").unwrap();
                 let rdx = RegisterRef::parse("rdx").unwrap();
@@ -837,7 +1077,7 @@ impl Machine {
             _ => Err(RuntimeFault::new(
                 "unsupported_syscall",
                 format!(
-                    "syscall {number} is outside the current Lecture 4 slice (write/1 and exit/60 are ready)"
+                    "syscall {number} is outside the current Lecture 5 slice (read/0, write/1, and exit/60 are ready)"
                 ),
             )),
         }
@@ -918,69 +1158,81 @@ impl Machine {
         events: &mut Vec<StepEvent>,
     ) -> Result<(), RuntimeFault> {
         let effective = self.effective_address(address, events)?;
-        let range = self.memory_range(effective, usize::from(width / 8))?;
-        let before = self.memory[range.clone()].to_vec();
         let bytes = value.to_le_bytes();
-        let after = bytes[..range.len()].to_vec();
-        self.memory[range].copy_from_slice(&after);
-        let symbol = address
-            .symbol
-            .clone()
-            .or_else(|| self.symbol_for_address(effective));
+        self.write_bytes(effective, &bytes[..usize::from(width / 8)], writes, events)
+    }
+
+    fn read_bytes(&self, address: u64, count: usize) -> Result<Vec<u8>, RuntimeFault> {
+        match self.mapped_range(address, count)? {
+            MappedRange::Data(range) => Ok(self.memory[range].to_vec()),
+            MappedRange::Stack(range) => Ok(self.stack[range].to_vec()),
+        }
+    }
+
+    fn write_bytes(
+        &mut self,
+        address: u64,
+        bytes: &[u8],
+        writes: &mut Vec<MemoryWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<(), RuntimeFault> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let mapped = self.mapped_range(address, bytes.len())?;
+        let before = match &mapped {
+            MappedRange::Data(range) => self.memory[range.clone()].to_vec(),
+            MappedRange::Stack(range) => self.stack[range.clone()].to_vec(),
+        };
+        match mapped {
+            MappedRange::Data(range) => self.memory[range].copy_from_slice(bytes),
+            MappedRange::Stack(range) => self.stack[range].copy_from_slice(bytes),
+        }
+        let symbol = self.symbol_for_address(address);
         writes.push(MemoryWriteDelta {
-            address: effective,
+            address,
             before: before.clone(),
-            after: after.clone(),
+            after: bytes.to_vec(),
             symbol: symbol.clone(),
         });
         events.push(StepEvent::MemoryWrite {
-            address: hex64(effective),
+            address: hex64(address),
             before: format_bytes(&before),
-            after: format_bytes(&after),
-            width: usize::from(width),
+            after: format_bytes(bytes),
+            width: bytes.len() * 8,
             symbol,
         });
         Ok(())
     }
 
-    fn read_bytes(&self, address: u64, count: usize) -> Result<Vec<u8>, RuntimeFault> {
-        let range = self.memory_range(address, count)?;
-        Ok(self.memory[range].to_vec())
-    }
-
-    fn memory_range(
-        &self,
-        address: u64,
-        count: usize,
-    ) -> Result<std::ops::Range<usize>, RuntimeFault> {
-        let Some(offset) = address.checked_sub(DATA_BASE) else {
-            return Err(self.memory_fault(address, count));
-        };
-        let Ok(offset) = usize::try_from(offset) else {
-            return Err(self.memory_fault(address, count));
-        };
-        let Some(end) = offset.checked_add(count) else {
-            return Err(self.memory_fault(address, count));
-        };
-        if end > self.memory.len() {
-            return Err(self.memory_fault(address, count));
+    fn mapped_range(&self, address: u64, count: usize) -> Result<MappedRange, RuntimeFault> {
+        if let Some(range) = checked_region_range(address, count, DATA_BASE, self.memory.len()) {
+            return Ok(MappedRange::Data(range));
         }
-        Ok(offset..end)
+        if let Some(range) = checked_region_range(address, count, STACK_BASE, self.stack.len()) {
+            return Ok(MappedRange::Stack(range));
+        }
+        Err(self.memory_fault(address, count))
     }
 
     fn memory_fault(&self, address: u64, count: usize) -> RuntimeFault {
         RuntimeFault::new(
             "unmapped_memory",
             format!(
-                "memory access at {} for {count} byte(s) is outside the mapped .data range {}..{}",
+                "memory access at {} for {count} byte(s) is outside mapped data {}..{} and stack {}..{}",
                 hex64(address),
                 hex64(DATA_BASE),
-                hex64(DATA_BASE + self.memory.len() as u64)
+                hex64(DATA_BASE + self.memory.len() as u64),
+                hex64(STACK_BASE),
+                hex64(STACK_START)
             ),
         )
     }
 
     fn symbol_for_address(&self, address: u64) -> Option<String> {
+        if !(DATA_BASE..DATA_BASE + self.memory.len() as u64).contains(&address) {
+            return None;
+        }
         self.data_symbols
             .iter()
             .filter(|(_, symbol_address)| **symbol_address <= address)
@@ -994,15 +1246,65 @@ impl Machine {
                 .restore(write.register.canonical(), write.before);
         }
         for write in delta.memory_writes.iter().rev() {
-            let offset = (write.address - DATA_BASE) as usize;
-            self.memory[offset..offset + write.before.len()].copy_from_slice(&write.before);
+            match self
+                .mapped_range(write.address, write.before.len())
+                .expect("a recorded write remains mapped")
+            {
+                MappedRange::Data(range) => self.memory[range].copy_from_slice(&write.before),
+                MappedRange::Stack(range) => self.stack[range].copy_from_slice(&write.before),
+            }
         }
+        self.stdin_cursor = delta.stdin_cursor_before;
         self.stdout.truncate(delta.stdout_len_before);
         self.stderr.truncate(delta.stderr_len_before);
         self.flags = delta.flags_before;
         self.pc = delta.pc_before;
         self.status = delta.status_before.clone();
     }
+
+    pub(crate) fn submit_input_line(&mut self, text: &str) -> Result<Vec<u8>, String> {
+        if matches!(
+            self.status,
+            MachineStatus::Exited { .. } | MachineStatus::Faulted { .. }
+        ) {
+            return Err("the process has halted; reset before submitting more input".to_string());
+        }
+        let mut bytes = text.as_bytes().to_vec();
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        self.stdin.extend_from_slice(&bytes);
+        if matches!(self.status, MachineStatus::WaitingForInput { .. }) {
+            self.status = MachineStatus::Paused;
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn cancel_input_wait(&mut self) -> bool {
+        if matches!(self.status, MachineStatus::WaitingForInput { .. }) {
+            self.status = MachineStatus::Paused;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum MappedRange {
+    Data(std::ops::Range<usize>),
+    Stack(std::ops::Range<usize>),
+}
+
+fn checked_region_range(
+    address: u64,
+    count: usize,
+    base: u64,
+    length: usize,
+) -> Option<std::ops::Range<usize>> {
+    let offset = usize::try_from(address.checked_sub(base)?).ok()?;
+    let end = offset.checked_add(count)?;
+    (end <= length).then_some(offset..end)
 }
 
 #[derive(Clone, Debug)]
@@ -1237,6 +1539,9 @@ pub(crate) struct StepDelta {
     memory_writes: Vec<MemoryWriteDelta>,
     stdout_len_before: usize,
     stderr_len_before: usize,
+    stdin_cursor_before: usize,
+    #[allow(dead_code)]
+    stdin_cursor_after: usize,
 }
 
 impl StepDelta {
@@ -1279,6 +1584,7 @@ pub(crate) struct ExecutedStep {
     pub(crate) delta: StepDelta,
     pub(crate) events: Vec<StepEvent>,
     pub(crate) explanation: String,
+    pub(crate) completed: bool,
 }
 
 #[cfg(test)]

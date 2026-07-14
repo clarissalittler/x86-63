@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Diagnostic, Flags, MachineStatus, SourceLocation, SymbolView};
 
-// Version 2 adds data memory, process I/O, effective-address receipts, and
-// branch/output events to every machine view and command result.
-pub const PROTOCOL_VERSION: u32 = 2;
+// Version 3 adds line-oriented stdin, blocking reads, source-level calls, and
+// a stack projection while preserving string transport for every u64 value.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
@@ -13,6 +13,7 @@ pub enum Command {
     Next,
     Back,
     Continue { max_steps: usize },
+    SubmitInput { text: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +35,7 @@ pub struct MachineView {
     pub registers: Vec<RegisterView>,
     pub flags: FlagsView,
     pub memory: MemoryView,
+    pub stack: StackView,
     pub io: IoView,
     pub history_depth: usize,
 }
@@ -47,10 +49,32 @@ pub struct MemoryView {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IoView {
+    pub stdin_bytes: Vec<u8>,
+    pub stdin_escaped: String,
+    pub stdin_consumed: usize,
     pub stdout_bytes: Vec<u8>,
     pub stdout_escaped: String,
     pub stderr_bytes: Vec<u8>,
     pub stderr_escaped: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackView {
+    pub base: String,
+    pub top: String,
+    pub rsp: String,
+    pub rbp: String,
+    pub bytes: Vec<u8>,
+    pub slots: Vec<StackSlotView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackSlotView {
+    pub address: String,
+    pub value: String,
+    pub signed: String,
+    pub offset_from_rbp: Option<i64>,
+    pub label: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +168,23 @@ pub enum StepEvent {
         target: String,
         taken: bool,
     },
+    Call {
+        target: String,
+        return_address: String,
+        return_location: Option<SourceLocation>,
+    },
+    Return {
+        return_address: String,
+        return_location: Option<SourceLocation>,
+    },
+    StackPush {
+        value: String,
+        stack_pointer: String,
+    },
+    StackPop {
+        value: String,
+        stack_pointer: String,
+    },
     Syscall {
         number: String,
         name: Option<String>,
@@ -154,6 +195,20 @@ pub enum StepEvent {
         shell_status: u8,
     },
     Output {
+        fd: u64,
+        bytes: Vec<u8>,
+        escaped: String,
+    },
+    InputRequested {
+        fd: u64,
+        address: String,
+        count: usize,
+    },
+    InputSubmitted {
+        bytes: Vec<u8>,
+        escaped: String,
+    },
+    InputRead {
         fd: u64,
         bytes: Vec<u8>,
         escaped: String,

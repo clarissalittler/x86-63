@@ -4,10 +4,11 @@
 CS201. It runs GNU/AT&T-syntax assembly one instruction at a time and explains
 the resulting register, flag, and process-state changes.
 
-The first two student-testable slices are working. They cover the 15 distinct
-programs in the maintained Lecture 3–4 progression, spanning register
-arithmetic, data, addressing, branches, loops, and process output. (Lecture 4's
-annotated repeat of `firstadd.s` is represented by the same Lecture 3 lesson.)
+The first three student-testable slices are working. They cover the 21 distinct
+programs in the maintained Lecture 3–5 progression, spanning register
+arithmetic, data, addressing, branches, loops, process I/O, routines, calls,
+and stack frames. (Lecture 4's annotated repeat of `firstadd.s` is represented
+by the same Lecture 3 lesson.)
 Both interfaces run over one Rust execution core:
 
 - a React/TypeScript browser visualizer using the core through WebAssembly;
@@ -15,16 +16,17 @@ Both interfaces run over one Rust execution core:
   scriptable `run`, `check`, and JSONL `trace` modes.
 
 Both interfaces have exact `u64` register behavior, all general-purpose
-register aliases, little-endian data memory, arithmetic flags, signed and
-unsigned branches, Linux `write`/`exit`, strict source diagnostics, structured
-explanations, reset, and reversible stepping. Memory writes, branch decisions,
-and process output are reversible too. The browser includes guided register and
-memory tutorials.
+register aliases, little-endian `.data`/`.rodata`/`.bss` memory, a mapped stack,
+arithmetic flags, signed and unsigned branches, `call`/`ret`/`push`/`pop`, Linux
+`read`/`write`/`exit`, strict source diagnostics, structured explanations,
+reset, reversible stepping, and real step-over for calls. Memory and stack
+writes, input consumption, branch decisions, and process output are reversible
+too. The browser includes guided register, memory, and stack tutorials.
 
-This is not yet the full Lectures 3–6 target described in the design. Calls,
-the stack, integer I/O helpers, and the later instruction families are the next
-course-shaped slices. Unsupported syntax is rejected explicitly instead of
-being guessed or silently repaired.
+This is not yet the full Lectures 3–6 target described in the design. Lecture
+6's multi-module `readInt`/`writeInt` helpers, recursive factorial, and later
+instruction families are the next course-shaped slice. Unsupported syntax is
+rejected explicitly instead of being guessed or silently repaired.
 
 ## Try the native version
 
@@ -47,6 +49,8 @@ Other useful commands:
 cargo run -p x86-63-cli -- examples
 cargo run -p x86-63-cli -- check course-content/lecture4/addArray3.s
 cargo run -p x86-63-cli -- run --example hello
+cargo run -p x86-63-cli -- run --example echo --stdin hello
+cargo run -p x86-63-cli -- tui --example funstack
 cargo run -p x86-63-cli -- trace --example firstsub
 ```
 
@@ -67,24 +71,27 @@ npm run web:dev
 ```
 
 Open the local address printed by Vite. Choose **Guided tutorial** for registers
-and arithmetic, or **Memory tutorial** for `lea`, scaled indexing,
-little-endian data, and reversible writes. A static production build is created
-with `npm run web:build`; it has no server-side runtime dependency.
+and arithmetic, **Memory tutorial** for `lea`, scaled indexing, little-endian
+data, and reversible writes, or **Stack tutorial** for calls, return addresses,
+and local variables. A static production build is created with
+`npm run web:build`; it has no server-side runtime dependency.
 
 ## Verify the slice
 
 ```sh
 cargo test --workspace
 ./scripts/differential-lecture4.sh
+./scripts/differential-lecture5.sh
 npm run wasm:test
 npm run web:build
 ```
 
-The native integration tests and Node/WASM smoke test run all 15 maintained
-lessons and assert register, memory, branch, output, fault, and exit outcomes,
-including reverse stepping and 64-bit-safe JSON transport. The differential
-script assembles and runs all 11 new Lecture 4 fixtures with GNU `as`/`ld`,
-then compares their shell statuses and output bytes with the teaching machine.
+The native integration tests and Node/WASM smoke test run all 21 maintained
+lessons and assert register, memory, stack, branch, input, output, fault, and
+exit outcomes, including reverse stepping and 64-bit-safe JSON transport. The
+differential scripts assemble the Lecture 4 and Lecture 5 fixtures with GNU
+`as`/`ld`, run them, and compare their shell statuses and output bytes with the
+teaching machine.
 
 ## Documentation
 

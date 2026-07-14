@@ -5,7 +5,9 @@ pub enum ReplInput {
     Command(Command),
     Registers,
     Memory,
+    Stack,
     Output,
+    Input(String),
     Why,
     Help,
     Quit,
@@ -14,7 +16,14 @@ pub enum ReplInput {
 }
 
 pub fn parse_repl_input(input: &str) -> ReplInput {
-    let normalized = input.trim().to_ascii_lowercase();
+    let trimmed = input.trim();
+    let normalized = trimmed.to_ascii_lowercase();
+    if normalized == "input" {
+        return ReplInput::Input(String::new());
+    }
+    if normalized.starts_with("input ") {
+        return ReplInput::Input(trimmed[5..].trim_start().to_string());
+    }
     match normalized.as_str() {
         "" => ReplInput::Empty,
         "si" | "s" | "step" => ReplInput::Command(Command::Step),
@@ -24,6 +33,7 @@ pub fn parse_repl_input(input: &str) -> ReplInput {
         "c" | "continue" | "run" => ReplInput::Command(Command::Continue { max_steps: 10_000 }),
         "regs" | "registers" | "info registers" => ReplInput::Registers,
         "mem" | "memory" | "x/data" => ReplInput::Memory,
+        "stack" | "x/stack" => ReplInput::Stack,
         "io" | "output" | "stdout" => ReplInput::Output,
         "why" => ReplInput::Why,
         "h" | "help" | "?" => ReplInput::Help,
