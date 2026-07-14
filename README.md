@@ -52,6 +52,10 @@ cargo run -p x86-63-cli -- trace --example firstsub
 
 ## Try the browser version
 
+The interactive visualizer is published at
+[clarissalittler.github.io/x86-63](https://clarissalittler.github.io/x86-63/).
+Every push to `main` tests and redeploys the site through GitHub Pages.
+
 The web build needs Node/npm, the Rust WASM target, and the matching
 `wasm-bindgen` CLI:
 
