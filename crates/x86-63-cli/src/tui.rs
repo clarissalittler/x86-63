@@ -88,6 +88,15 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> 
                 KeyCode::Char('b') | KeyCode::Left => Some(Command::Back),
                 KeyCode::Char('r') => Some(Command::Reset),
                 KeyCode::Char('c') => Some(Command::Continue { max_steps: 10_000 }),
+                KeyCode::Char('x') => {
+                    app.view()
+                        .next_instruction
+                        .map(|location| Command::ToggleBreakpoint {
+                            module: location.module,
+                            line: location.line,
+                        })
+                }
+                KeyCode::Char('X') => Some(Command::ClearBreakpoints),
                 _ => None,
             };
             if let Some(command) = command {
@@ -216,8 +225,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
             app.input_buffer
         )
     } else {
-        " s/Enter step  n next  b/← back  c run  i input  r reset  m regs/mem/stack  q quit "
-            .to_string()
+        " s step n next b back c run x break X clear i input r reset m pane q quit ".to_string()
     };
     let help = Paragraph::new(help_text)
         .style(Style::default().fg(Color::Black).bg(Color::Cyan))
@@ -243,6 +251,10 @@ fn draw_source(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             let is_current = current.is_some_and(|location| {
                 location.module == module.name && location.line == line_number
             });
+            let is_breakpoint = view
+                .breakpoints
+                .iter()
+                .any(|location| location.module == module.name && location.line == line_number);
             let style = if is_current {
                 Style::default()
                     .fg(Color::Black)
@@ -253,12 +265,20 @@ fn draw_source(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             };
             lines.push(Line::from(vec![
                 Span::styled(if is_current { "▶" } else { " " }, style),
+                Span::styled(
+                    if is_breakpoint { "●" } else { " " },
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(format!(" {line_number:>3}  {source}"), style),
             ]));
         }
     }
     let title = module.map_or(" Source ".to_string(), |module| {
-        format!(" Source: {} ", module.name)
+        format!(
+            " Source: {} · {} breakpoint(s) ",
+            module.name,
+            view.breakpoints.len()
+        )
     });
     let paragraph = Paragraph::new(Text::from(lines))
         .block(Block::default().borders(Borders::ALL).title(title))

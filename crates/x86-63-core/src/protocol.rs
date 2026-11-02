@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Diagnostic, Flags, MachineStatus, SourceLocation, SymbolView};
 
-// Version 4 adds linked lesson modules, recursive frame projections, alignment
-// receipts, and the multiply/divide operations used by Lecture 6 helpers.
-pub const PROTOCOL_VERSION: u32 = 4;
+// Version 5 adds source breakpoints and makes debugger stops part of the same
+// command/event protocol used by the browser, REPL, and TUI.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
@@ -14,6 +14,8 @@ pub enum Command {
     Back,
     Continue { max_steps: usize },
     SubmitInput { text: String },
+    ToggleBreakpoint { module: String, line: usize },
+    ClearBreakpoints,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +40,7 @@ pub struct MachineView {
     pub stack: StackView,
     pub io: IoView,
     pub history_depth: usize,
+    pub breakpoints: Vec<SourceLocation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +245,13 @@ pub enum StepEvent {
         message: String,
     },
     Reversed {
+        location: SourceLocation,
+    },
+    BreakpointChanged {
+        location: SourceLocation,
+        enabled: bool,
+    },
+    BreakpointHit {
         location: SourceLocation,
     },
     Reset,

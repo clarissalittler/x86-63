@@ -227,7 +227,8 @@ bridge into the real debugger rather than a parallel command language.
 | `ni`, `next` | execute through a call as one source-level action |
 | `back`, `reverse-stepi` | undo one deterministic transition |
 | `c`, `continue` | run to breakpoint, input wait, exit, fault, or step limit |
-| `break <label|line>` | set breakpoint by symbol or source line |
+| `break <label|line|module:line>` | toggle a breakpoint by symbol or source line |
+| `info breakpoints`, `clear breakpoints` | list or remove source breakpoints |
 | `info registers` | show machine registers |
 | `p/x`, `p/d`, `p/t <expr>` | inspect expression in hex/decimal/binary |
 | `x/8xb &buff`, `x/4gx $rsp`, `x/s &msg` | GDB-like memory examination |

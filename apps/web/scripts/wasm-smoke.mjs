@@ -17,7 +17,26 @@ assert.deepEqual(
   lessons.slice(0, 4).map((lesson) => lesson.id),
   ["first", "firstfixed", "firstadd", "firstsub"]
 );
-assert.equal(lessons.length, 25);
+assert.equal(lessons.length, 31);
+assert.deepEqual(
+  lessons.filter((lesson) => lesson.collection === "practice").map((lesson) => lesson.id),
+  [
+    "missingimmediate",
+    "reversedoperands",
+    "wrongwidth",
+    "callersavedloop",
+    "misalignedcall"
+  ]
+);
+assert.ok(
+  lessons
+    .filter((lesson) => lesson.collection === "practice")
+    .every((lesson) => lesson.challenge?.hints.length === 3)
+);
+assert.deepEqual(
+  lessons.filter((lesson) => lesson.collection === "assignment").map((lesson) => lesson.id),
+  ["sum5"]
+);
 
 function lessonModules(lesson) {
   return [
@@ -54,13 +73,32 @@ const expectedStatus = new Map([
   ["readwrite", { kind: "exited", shell_status: 0 }],
   ["facttrace", { kind: "exited", shell_status: 120 }],
   ["fact", { kind: "exited", shell_status: 0 }],
-  ["sumlooparray", { kind: "exited", shell_status: 0 }]
+  ["sumlooparray", { kind: "exited", shell_status: 0 }],
+  ["sum5", { kind: "exited", shell_status: 0 }],
+  ["wrongwidth", { kind: "exited", shell_status: 255 }],
+  ["callersavedloop", { kind: "exited", shell_status: 0 }],
+  ["misalignedcall", { kind: "exited", shell_status: 0 }]
+]);
+
+const expectedBuildError = new Map([
+  ["missingimmediate", "E212"],
+  ["reversedoperands", "E215"]
 ]);
 
 for (const lesson of lessons) {
+  if (expectedBuildError.has(lesson.id)) {
+    let challengeError;
+    try {
+      new WasmSession(JSON.stringify(lessonModules(lesson)));
+    } catch (error) {
+      challengeError = JSON.parse(String(error));
+    }
+    assert.equal(challengeError.diagnostics[0].code, expectedBuildError.get(lesson.id));
+    continue;
+  }
   const session = new WasmSession(JSON.stringify(lessonModules(lesson)));
   const initial = JSON.parse(session.view_json());
-  assert.equal(initial.protocol_version, 4);
+  assert.equal(initial.protocol_version, 5);
   assert.equal(initial.status.kind, "paused");
 
   if (["echo", "readwrite", "fact"].includes(lesson.id)) {
@@ -68,14 +106,42 @@ for (const lesson of lessons) {
     session.execute(JSON.stringify({ SubmitInput: { text } }));
   }
 
-  const result = JSON.parse(
-    session.execute(JSON.stringify({ Continue: { max_steps: 2_000 } }))
-  );
+  let result;
+  if (lesson.id === "sum5") {
+    for (const text of lesson.assignment.sample_inputs) {
+      const waiting = JSON.parse(
+        session.execute(JSON.stringify({ Continue: { max_steps: 2_000 } }))
+      );
+      assert.equal(waiting.view.status.kind, "waiting_for_input");
+      session.execute(JSON.stringify({ SubmitInput: { text } }));
+    }
+    result = JSON.parse(
+      session.execute(JSON.stringify({ Continue: { max_steps: 2_000 } }))
+    );
+    assert.equal(result.view.io.stdout_escaped, lesson.assignment.expected_output);
+  } else {
+    result = JSON.parse(
+      session.execute(JSON.stringify({ Continue: { max_steps: 2_000 } }))
+    );
+  }
   const expected = expectedStatus.get(lesson.id);
   assert.equal(result.view.status.kind, expected.kind, lesson.id);
   if (expected.code) assert.equal(result.view.status.code, expected.code, lesson.id);
   if (expected.shell_status !== undefined) {
     assert.equal(result.view.status.shell_status, expected.shell_status, lesson.id);
+  }
+  if (lesson.id === "wrongwidth") {
+    assert.equal(
+      result.view.registers.find((register) => register.name === "rdi").unsigned,
+      "4294967551"
+    );
+  }
+  if (lesson.id === "callersavedloop") {
+    assert.equal(result.view.io.stdout_escaped, "3");
+  }
+  if (lesson.id === "misalignedcall") {
+    assert.equal(result.view.io.stdout_escaped, "42");
+    assert.equal(result.diagnostics[0].code, "W401");
   }
 
   // JSON is the public frontend boundary: 64-bit values must remain strings.
@@ -134,6 +200,38 @@ const factorialResult = JSON.parse(
 assert.equal(factorialResult.view.io.stdout_escaped, "Enter a number: 120");
 linkedFactorial.free();
 
+const breakpointExample = lessons.find((lesson) => lesson.id === "firstadd");
+const breakpointSession = new WasmSession(
+  JSON.stringify([{ name: breakpointExample.module_name, source: breakpointExample.source }])
+);
+const breakpointSet = JSON.parse(
+  breakpointSession.execute(
+    JSON.stringify({ ToggleBreakpoint: { module: breakpointExample.module_name, line: 7 } })
+  )
+);
+assert.deepEqual(
+  breakpointSet.view.breakpoints.map((location) => [location.module, location.line]),
+  [[breakpointExample.module_name, 7]]
+);
+assert.equal(breakpointSet.events[0].kind, "breakpoint_changed");
+const breakpointStop = JSON.parse(
+  breakpointSession.execute(JSON.stringify({ Continue: { max_steps: 100 } }))
+);
+assert.equal(breakpointStop.steps_executed, 2);
+assert.equal(breakpointStop.view.next_instruction.line, 7);
+assert.equal(breakpointStop.events.at(-1).kind, "breakpoint_hit");
+assert.equal(breakpointStop.diagnostics.length, 0);
+const breakpointResume = JSON.parse(
+  breakpointSession.execute(JSON.stringify({ Continue: { max_steps: 100 } }))
+);
+assert.equal(breakpointResume.view.status.kind, "exited");
+assert.equal(breakpointResume.view.status.shell_status, 30);
+const breakpointClear = JSON.parse(
+  breakpointSession.execute(JSON.stringify("ClearBreakpoints"))
+);
+assert.equal(breakpointClear.view.breakpoints.length, 0);
+breakpointSession.free();
+
 const factTrace = lessons.find((lesson) => lesson.id === "facttrace");
 const recursion = new WasmSession(JSON.stringify(lessonModules(factTrace)));
 let recursiveView = JSON.parse(recursion.view_json());
@@ -175,4 +273,4 @@ try {
 assert.equal(buildError.diagnostics[0].code, "E212");
 assert.match(buildError.diagnostics[0].help, /\$60/);
 
-console.log("WASM protocol smoke test passed for all 25 Lecture 3–6 lessons.");
+console.log("WASM protocol smoke test passed for 25 Lecture 3–6 lessons, Assignment 2, and 5 repair labs.");

@@ -101,6 +101,45 @@ button.primary {
   font-style: italic;
 }
 
+.mode-and-tagline {
+  align-items: flex-end;
+  display: grid;
+  gap: 0.45rem;
+  justify-items: end;
+}
+
+.mode-and-tagline .tagline {
+  margin: 0;
+}
+
+.mode-toggle {
+  background: #d6e1d8;
+  border: 1px solid #a9baae;
+  border-radius: 0.55rem;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(7rem, 1fr));
+  padding: 0.2rem;
+}
+
+.mode-toggle button {
+  background: transparent;
+  border-color: transparent;
+  display: grid;
+  gap: 0.05rem;
+  padding: 0.35rem 0.65rem;
+}
+
+.mode-toggle button small {
+  font-size: 0.65rem;
+  font-weight: 500;
+}
+
+.mode-toggle button.selected {
+  background: #fffdf8;
+  border-color: #789083;
+  box-shadow: 0 2px 5px rgba(31, 50, 42, 0.12);
+}
+
 .lesson-bar {
   background: #e2ebdf;
   border: 1px solid #b9cbbd;
@@ -128,6 +167,149 @@ button.primary {
   border-left: 5px solid #e7a93d;
   margin: 0.8rem 0;
   padding: 0.7rem 1rem;
+}
+
+.prediction p {
+  margin: 0.25rem 0;
+}
+
+.prediction-journal {
+  align-items: center;
+  display: grid;
+  gap: 0.7rem;
+  grid-template-columns: minmax(15rem, 0.9fr) minmax(16rem, 1.1fr) auto;
+}
+
+.prediction-journal textarea {
+  background: #fffdf8;
+  border: 1px solid #b59c5e;
+  border-radius: 0.4rem;
+  padding: 0.55rem 0.7rem;
+  resize: vertical;
+  width: 100%;
+}
+
+.prediction-locked,
+.prediction-revealed {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.prediction-revealed {
+  background: #e5f3e9;
+  border-left-color: #24735c;
+}
+
+.challenge {
+  align-items: center;
+  background: #f3eafa;
+  border-color: #af8ac2;
+  display: flex;
+  gap: 1.25rem;
+  justify-content: space-between;
+  margin: 0.8rem 0;
+}
+
+.challenge-copy h2 {
+  font-family: Georgia, serif;
+  font-size: 1.2rem;
+  margin: 0.2rem 0;
+}
+
+.challenge-copy p {
+  margin: 0.35rem 0;
+}
+
+.challenge-hints {
+  background: rgba(255, 253, 248, 0.72);
+  border-radius: 0.4rem;
+  margin: 0.55rem 0;
+  padding: 0.55rem 0.8rem 0.55rem 2rem;
+}
+
+.challenge-hints li + li {
+  margin-top: 0.3rem;
+}
+
+.challenge-feedback {
+  border-left: 4px solid #9b6ab4;
+  font-weight: 700;
+  padding-left: 0.7rem;
+}
+
+.challenge-feedback.solved {
+  border-left-color: #24735c;
+  color: #125231;
+}
+
+.challenge-controls {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+
+.assignment {
+  align-items: center;
+  background: #e8f1f8;
+  border-color: #8aa9bd;
+  display: flex;
+  gap: 1.25rem;
+  justify-content: space-between;
+  margin: 0.8rem 0;
+}
+
+.assignment-copy h2 {
+  font-family: Georgia, serif;
+  font-size: 1.2rem;
+  margin: 0.2rem 0;
+}
+
+.assignment-checklist {
+  display: grid;
+  gap: 0.25rem;
+  list-style: none;
+  margin: 0.65rem 0;
+  padding: 0;
+}
+
+.assignment-checklist li {
+  align-items: baseline;
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: 1rem minmax(0, 1fr);
+}
+
+.assignment-checklist li.passed {
+  color: #125231;
+  font-weight: 750;
+}
+
+.assignment-sample {
+  margin: 0.35rem 0;
+}
+
+.assignment-feedback {
+  border-left: 4px solid #517f9e;
+  font-weight: 700;
+  margin: 0.6rem 0 0;
+  padding-left: 0.7rem;
+}
+
+.assignment-feedback.passed {
+  border-left-color: #24735c;
+  color: #125231;
+}
+
+.assignment-controls {
+  display: grid;
+  flex: 0 0 min(17rem, 35%);
+  gap: 0.45rem;
+}
+
+.assignment-controls small {
+  color: #52665d;
+  line-height: 1.35;
 }
 
 .tutorial {
@@ -201,6 +383,52 @@ button.primary {
   max-width: 13rem;
 }
 
+.workspace-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.65rem;
+}
+
+.workspace-actions small {
+  color: #52665d;
+  flex: 1 1 16rem;
+}
+
+.visually-hidden {
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
+.panel-control {
+  align-items: center;
+  color: #52665d;
+  display: flex;
+  font-size: 0.7rem;
+  font-weight: 800;
+  gap: 0.35rem;
+  margin-left: auto;
+  text-transform: uppercase;
+}
+
+.panel-control select {
+  padding: 0.32rem 0.5rem;
+  text-transform: none;
+}
+
+.focus-note {
+  color: #64756c;
+  display: block;
+  font-size: 0.7rem;
+  margin-top: 0.15rem;
+}
+
 .source-editor {
   width: 100%;
   min-height: 14rem;
@@ -229,10 +457,33 @@ button.primary {
 .source-listing li {
   counter-increment: source-line;
   display: grid;
-  grid-template-columns: 3.2rem 1fr;
+  grid-template-columns: 3.2rem 1.7rem minmax(0, 1fr);
   min-height: 1.5rem;
   padding: 0.05rem 0.65rem;
   white-space: pre;
+}
+
+.breakpoint-toggle {
+  align-self: center;
+  background: transparent;
+  border: 0;
+  color: #86928c;
+  font-size: 0.95rem;
+  line-height: 1;
+  min-height: 1.35rem;
+  padding: 0;
+}
+
+.breakpoint-toggle:enabled {
+  cursor: pointer;
+}
+
+.breakpoint-toggle:disabled {
+  color: transparent;
+}
+
+.source-listing li.has-breakpoint .breakpoint-toggle {
+  color: #b53a31;
 }
 
 .source-listing li::before {
@@ -270,13 +521,21 @@ button.primary {
 }
 
 .register strong {
-  grid-row: 1 / span 2;
+  grid-row: 1 / span 3;
 }
 
 .register code,
-.register small {
+.register small,
+.register-role {
   grid-column: 2;
   overflow-wrap: anywhere;
+}
+
+.register-role {
+  color: #52665d;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.66rem;
+  font-weight: 700;
 }
 
 .register:nth-child(odd) {
@@ -290,6 +549,29 @@ button.primary {
 
 .register small {
   color: #65756d;
+}
+
+.prediction-curtain {
+  background: repeating-linear-gradient(
+    -45deg,
+    #f3ead0,
+    #f3ead0 12px,
+    #faf4e3 12px,
+    #faf4e3 24px
+  );
+  border-color: #c39b3e;
+  min-height: 14rem;
+  padding: 1.4rem;
+}
+
+.prediction-curtain h2 {
+  font-family: Georgia, serif;
+  font-size: 1.35rem;
+  margin: 0.35rem 0;
+}
+
+.prediction-curtain button {
+  margin-top: 0.6rem;
 }
 
 .status {
@@ -348,6 +630,26 @@ button.primary {
 .module-select {
   margin-left: auto;
   max-width: 11rem;
+}
+
+.source-state {
+  background: #dce9e0;
+  border-radius: 999px;
+  color: #365348;
+  font-size: 0.67rem;
+  font-weight: 800;
+  padding: 0.25rem 0.55rem;
+  white-space: nowrap;
+}
+
+.source-state.dirty {
+  background: #fff0bd;
+  color: #6d4b00;
+}
+
+.source-state.blocked {
+  background: #ffd4ca;
+  color: #812b1d;
 }
 
 .memory-symbols {
@@ -507,6 +809,14 @@ button.primary {
   padding-top: 0.8rem;
 }
 
+.output-held {
+  background: #fff3cf;
+  border-left: 4px solid #e7a93d;
+  font-weight: 700;
+  margin: 0;
+  padding: 0.65rem;
+}
+
 .output-stream pre {
   background: #15221d;
   border-radius: 0.4rem;
@@ -544,9 +854,20 @@ button.primary {
   font-size: 0.85rem;
 }
 
-.diagnostics {
+.event-list .event-omission {
+  color: #64756c;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-style: italic;
+}
+
+.diagnostics.has-errors {
   border-color: #d66c55;
   box-shadow: inset 5px 0 #d66c55;
+}
+
+.diagnostics.warnings-only {
+  border-color: #d3a333;
+  box-shadow: inset 5px 0 #d3a333;
 }
 
 .diagnostics article + article {
@@ -575,6 +896,8 @@ button.primary {
 @media (max-width: 720px) {
   .masthead,
   .lesson-bar,
+  .challenge,
+  .assignment,
   .tutorial,
   .flags-panel {
     align-items: stretch;
@@ -591,6 +914,28 @@ button.primary {
     width: 100%;
   }
 
+  .mode-and-tagline {
+    align-items: stretch;
+    justify-items: stretch;
+  }
+
+  .mode-toggle {
+    width: 100%;
+  }
+
+  .prediction-journal {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .challenge-controls {
+    justify-content: flex-start;
+  }
+
+  .assignment-controls {
+    flex-basis: auto;
+  }
+
   .source-column .panel-heading {
     align-items: stretch;
     flex-direction: column;
@@ -601,6 +946,18 @@ button.primary {
     margin-left: 0;
     max-width: none;
     width: 100%;
+  }
+
+  .registers-panel .panel-heading,
+  .memory-panel .panel-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .panel-control {
+    align-items: stretch;
+    flex-direction: column;
+    margin-left: 0;
   }
 
   .register-grid {

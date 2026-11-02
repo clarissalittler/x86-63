@@ -145,6 +145,16 @@ pub fn print_result(result: &CommandResult) {
             StepEvent::InputRead { escaped, .. } => {
                 println!("  read consumed: `{escaped}`")
             }
+            StepEvent::BreakpointChanged { location, enabled } => println!(
+                "  breakpoint {} at {}:{}",
+                if *enabled { "set" } else { "removed" },
+                location.module,
+                location.line
+            ),
+            StepEvent::BreakpointHit { location } => println!(
+                "  stopped before breakpoint at {}:{}",
+                location.module, location.line
+            ),
             _ => {}
         }
     }
@@ -303,12 +313,19 @@ pub fn print_source_context(view: &MachineView, modules: &[x86_63_core::SourceMo
     for (index, line) in module.source.lines().enumerate() {
         let line_number = index + 1;
         if (start..=end).contains(&line_number) {
-            let marker = if line_number == location.line {
+            let current_marker = if line_number == location.line {
                 "▶"
             } else {
                 " "
             };
-            println!("{marker} {line_number:>3}  {line}");
+            let breakpoint_marker = if view.breakpoints.iter().any(|breakpoint| {
+                breakpoint.module == module.name && breakpoint.line == line_number
+            }) {
+                "●"
+            } else {
+                " "
+            };
+            println!("{current_marker}{breakpoint_marker} {line_number:>3}  {line}");
         }
     }
 }

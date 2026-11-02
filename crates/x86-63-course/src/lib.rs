@@ -17,15 +17,34 @@ pub struct LessonModule {
     pub source: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Challenge {
+    pub goal: &'static str,
+    pub success: &'static str,
+    pub hints: &'static [&'static str],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Assignment {
+    pub goal: &'static str,
+    pub success: &'static str,
+    pub requirements: &'static [&'static str],
+    pub sample_inputs: &'static [&'static str],
+    pub expected_output: &'static str,
+}
+
 #[derive(Serialize)]
 pub struct LessonView<'a> {
     #[serde(flatten)]
     pub lesson: &'a Lesson,
     pub support_modules: &'static [LessonModule],
+    pub challenge: Option<&'static Challenge>,
+    pub collection: &'static str,
+    pub assignment: Option<&'static Assignment>,
 }
 
 pub fn lessons() -> &'static [Lesson] {
-    static LESSONS: [Lesson; 25] = [
+    static LESSONS: [Lesson; 31] = [
         Lesson {
             id: "first",
             title: "The deliberately incomplete program",
@@ -251,6 +270,60 @@ pub fn lessons() -> &'static [Lesson] {
             module_name: "sumLoopArray.s",
             source: include_str!("../../../course-content/lecture6/sumLoopArray.s"),
         },
+        Lesson {
+            id: "sum5",
+            title: "Assignment 2 · Read, store, sum, print",
+            lecture: 0,
+            summary: "Exercise the whole assignment rubric with five interactive inputs, an array, procedures, and output.",
+            prediction: "After the fifth input, where are the five values stored and which procedure produces 150?",
+            module_name: "sum5.s",
+            source: include_str!("../../../course-content/assignment2/sum5.s"),
+        },
+        Lesson {
+            id: "missingimmediate",
+            title: "Repair a missing immediate marker",
+            lecture: 0,
+            summary: "Use the assembler diagnostic to distinguish a literal from a memory address.",
+            prediction: "Why does `60` mean something different from `$60` in an operand?",
+            module_name: "missingImmediate.s",
+            source: include_str!("../../../course-content/practice/missingImmediate.s"),
+        },
+        Lesson {
+            id: "reversedoperands",
+            title: "Repair reversed operands",
+            lecture: 0,
+            summary: "Use a destination diagnostic to restore AT&T source,destination order.",
+            prediction: "Which operand must be writable in `mov source,destination`?",
+            module_name: "reversedOperands.s",
+            source: include_str!("../../../course-content/practice/reversedOperands.s"),
+        },
+        Lesson {
+            id: "wrongwidth",
+            title: "Find an accidental wide read",
+            lecture: 0,
+            summary: "See a quadword load consume two neighboring .long values.",
+            prediction: "What eight bytes will `movq score(%rip),%rdi` combine?",
+            module_name: "wrongWidth.s",
+            source: include_str!("../../../course-content/practice/wrongWidth.s"),
+        },
+        Lesson {
+            id: "callersavedloop",
+            title: "Keep a loop counter across a call",
+            lecture: 0,
+            summary: "Repair a loop that trusts a caller-saved register across writeInt.",
+            prediction: "May writeInt change %rcx before returning to the loop?",
+            module_name: "callerSavedLoop.s",
+            source: include_str!("../../../course-content/practice/callerSavedLoop.s"),
+        },
+        Lesson {
+            id: "misalignedcall",
+            title: "Repair call-site alignment",
+            lecture: 0,
+            summary: "Preserve a stack value while restoring 16-byte alignment before call.",
+            prediction: "After one push, what is %rsp modulo 16 immediately before call?",
+            module_name: "misalignedCall.s",
+            source: include_str!("../../../course-content/practice/misalignedCall.s"),
+        },
     ];
     &LESSONS
 }
@@ -267,9 +340,96 @@ pub fn support_modules(id: &str) -> &'static [LessonModule] {
     static IO_HELPERS: [LessonModule; 2] = [READ_INT, WRITE_INT];
     static WRITE_HELPER: [LessonModule; 1] = [WRITE_INT];
     match id {
-        "readwrite" | "fact" => &IO_HELPERS,
-        "sumlooparray" => &WRITE_HELPER,
+        "readwrite" | "fact" | "sum5" => &IO_HELPERS,
+        "sumlooparray" | "callersavedloop" | "misalignedcall" => &WRITE_HELPER,
         _ => &[],
+    }
+}
+
+pub fn assignment(id: &str) -> Option<&'static Assignment> {
+    static SUM5: Assignment = Assignment {
+        goal: "Run the complete minimal Assignment 2 workflow using five separate terminal lines.",
+        success: "The array contains 10, 20, 30, 40, and 50; stdout ends in 150 and a newline; the process exits normally.",
+        requirements: &[
+            "Read user input through a called procedure.",
+            "Store values in a five-element quadword array.",
+            "Compute the result in a procedure reached with call.",
+            "Write the result to standard output.",
+        ],
+        sample_inputs: &["10", "20", "30", "40", "50"],
+        expected_output: "Enter a number: Enter a number: Enter a number: Enter a number: Enter a number: 150\\n",
+    };
+    match id {
+        "sum5" => Some(&SUM5),
+        _ => None,
+    }
+}
+
+pub fn collection(id: &str, lecture: u8) -> &'static str {
+    if assignment(id).is_some() {
+        "assignment"
+    } else if challenge(id).is_some() {
+        "practice"
+    } else if lecture > 0 {
+        "lecture"
+    } else {
+        unreachable!("every unnumbered lesson belongs to an explicit collection")
+    }
+}
+
+pub fn challenge(id: &str) -> Option<&'static Challenge> {
+    static MISSING_IMMEDIATE: Challenge = Challenge {
+        goal: "Repair the operand, assemble the program, and exit cleanly.",
+        success: "The source assembles and the process exits with shell status 0.",
+        hints: &[
+            "The diagnostic distinguishes a literal value from an address.",
+            "Immediate operands begin with `$` in GNU/AT&T syntax.",
+            "Change `60` to `$60`; do not change the syscall.",
+        ],
+    };
+    static REVERSED_OPERANDS: Challenge = Challenge {
+        goal: "Repair the mov instruction without changing the intended value or register.",
+        success: "%rax receives 60 and the process exits with shell status 0.",
+        hints: &[
+            "An immediate value cannot be a destination.",
+            "AT&T syntax is `instruction source,destination`.",
+            "The repaired instruction is `mov $60,%rax`.",
+        ],
+    };
+    static WRONG_WIDTH: Challenge = Challenge {
+        goal: "Load only score, not the adjacent .long, and leave the result in %rdi.",
+        success: "The full 64-bit value in %rdi is 255 when the process exits.",
+        hints: &[
+            "`.long` reserves four bytes, while the current mov reads eight.",
+            "A 32-bit register destination also clears the upper half of its 64-bit register.",
+            "Use `movl score(%rip),%edi`.",
+        ],
+    };
+    static CALLER_SAVED_LOOP: Challenge = Challenge {
+        goal: "Make the program print 321 while keeping writeInt unchanged.",
+        success: "stdout is exactly `321` and the process exits normally.",
+        hints: &[
+            "%rcx is caller-saved, so writeInt is allowed to overwrite it.",
+            "The helper documents that it preserves %rbx.",
+            "Use %rbx consistently as the loop counter instead of %rcx.",
+        ],
+    };
+    static MISALIGNED_CALL: Challenge = Challenge {
+        goal: "Keep 42 on the stack, print it, and make the call with %rsp divisible by 16.",
+        success: "stdout is `42`, the process exits normally, and every call receipt says aligned.",
+        hints: &[
+            "The initial %rsp is aligned; pushing one quadword changes its remainder to 8.",
+            "Reserve one additional eight-byte padding slot before call, then release it afterward.",
+            "Insert `sub $8,%rsp` before call and `add $8,%rsp` after it.",
+        ],
+    };
+    match id {
+        "missingimmediate" => Some(&MISSING_IMMEDIATE),
+        "reversedoperands" => Some(&REVERSED_OPERANDS),
+        "wrongwidth" => Some(&WRONG_WIDTH),
+        "callersavedloop" => Some(&CALLER_SAVED_LOOP),
+        "misalignedcall" => Some(&MISALIGNED_CALL),
+        _ => None,
     }
 }
 
@@ -279,6 +439,9 @@ pub fn lesson_views() -> Vec<LessonView<'static>> {
         .map(|lesson| LessonView {
             lesson,
             support_modules: support_modules(lesson.id),
+            challenge: challenge(lesson.id),
+            collection: collection(lesson.id, lesson.lecture),
+            assignment: assignment(lesson.id),
         })
         .collect()
 }
@@ -301,6 +464,14 @@ mod tests {
                 assert!(!module.source.trim().is_empty());
                 assert!(!module.module_name.is_empty());
             }
+            assert_eq!(
+                challenge(lesson.id).is_some(),
+                collection(lesson.id, lesson.lecture) == "practice"
+            );
+            assert_eq!(
+                assignment(lesson.id).is_some(),
+                collection(lesson.id, lesson.lecture) == "assignment"
+            );
         }
     }
 }

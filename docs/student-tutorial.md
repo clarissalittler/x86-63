@@ -2,9 +2,10 @@
 
 The register lab takes about 15 minutes, the memory lab another 15, the
 input-and-stack lab about 20, and the linked-functions/recursion lab another
-20. You will predict and run CS201 assembly, reverse register, memory, stack,
-and input changes, investigate a broken program, and use an assembler
-diagnostic to repair a mistake.
+20. The Assignment 2 test bench adds about 15 minutes. You will predict and
+run CS201 assembly, reverse register, memory, stack, and input changes, stop at
+source breakpoints, investigate broken programs, and use machine evidence and
+progressive hints to repair five common mistakes.
 
 The current prototype teaches the maintained Lecture 3–6 subset: register and
 memory forms of `mov`/`add`/`sub`, `lea`, `cmp`, `xor`, conditional jumps,
@@ -34,7 +35,16 @@ By the end, you should be able to explain:
 - how `movzbl`, repeated multiply-by-10, and a byte loop parse ASCII digits;
 - how quotient and remainder from `divq` produce decimal output digits;
 - why `%rsp mod 16` should be zero immediately before a course call; and
-- how saved `%rbp` values form a reversible chain of recursive frames.
+- how saved `%rbp` values form a reversible chain of recursive frames;
+- why `%rcx` cannot safely hold a loop counter across an arbitrary call;
+- how the same bits can be interpreted as signed, unsigned, binary, or ASCII;
+  and
+- how to export a reproducible trace without asking the tool to solve the
+  program;
+- how a breakpoint stops before its marked instruction and then resumes once;
+  and
+- how to test five terminal reads separately while checking an array and
+  procedure-call rubric.
 
 ## Start in the browser
 
@@ -51,6 +61,12 @@ tutorial** fixes factorial's input at 5 and shows repeated `fact` frames growing
 and unwinding. Keep the tutorial card open while you use the execution
 controls.
 
+The browser starts in **Learn** mode. It shows registers used by the active
+source module plus registers with essential course roles, and labels roles such
+as “return value,” “argument 1,” and “callee-saved.” Choose **Inspect** when you
+want every general-purpose register and the complete machine density. Switching
+modes never changes execution state.
+
 The screen has two source views:
 
 - The dark upper box is editable. Changes there do nothing until you choose
@@ -62,10 +78,29 @@ Linked Lecture 6 lessons add a **Source module** chooser. Step into a call and
 the chooser follows execution into `readInt.s` or `writeInt.s`; choose another
 module manually when you want to compare definitions before stepping.
 
-The right side shows every general-purpose register in hexadecimal and signed
-decimal, the six arithmetic flags, symbolic memory and exact bytes, the live
-stack, process input/output, execution status, history depth, and an explanation
-of the most recent transition.
+The assembled source gutter has one breakpoint circle for each executable
+instruction. Labels, directives, comments, and blank lines have no circle
+because there is nothing to execute on those rows. Click a circle and choose
+**Run**: execution stops before that instruction, leaving it highlighted so
+you can predict it. A second **Run** resumes through that breakpoint once.
+**Reset** keeps your breakpoint; **Clear breaks** removes all of them.
+
+The workspace buttons above the editor add or remove linked modules, import
+one or more local `.s` files, and export/import an `x86-63-workspace` JSON
+bundle. Importing assembles the complete bundle. These operations are local to
+your browser; no source is uploaded.
+
+The register selector keeps hexadecimal visible and lets you interpret the same
+bits as signed decimal, unsigned decimal, binary, or eight ASCII byte cells.
+The Memory selector can follow source directives or regroup the same bytes as
+bytes, words, longs, quads, or text rows. Neither selector changes machine
+state—it changes only the view.
+
+Outside a guided tutorial, the yellow prediction journal asks you to write an
+answer before stepping. After you record it, Step, Next, or Run can proceed,
+but register, flag, memory, stack, and output results remain covered until you
+choose **Reveal result**. Your answer and the machine receipt are then shown
+together. This is self-comparison rather than automatic grading.
 
 ## Trace addition
 
@@ -488,26 +523,65 @@ Enter a number: 120
 When you Step rather than Run, the Source module chooser follows the whole path:
 `fact.s → readInt.s → fact.s → writeInt.s → fact.s`.
 
-## Make and repair a source mistake
+## Test the Assignment 2 whole-program workflow
 
-Return to **Addition and AT&T operand order**. In the dark editor, change:
+Select **Assignment 2 · Read, store, sum, print**. The workspace opens three
+modules: `sum5.s`, `readInt.s`, and `writeInt.s`. The blue test-bench card maps
+directly to the assignment requirements: input, an array, called procedures,
+and output.
 
-```asm
-mov $10,%rbx
-```
+Choose **Run five-line sample**. This action starts from a fresh build and does
+not preload or pipe all five inputs. It runs until `readInt` blocks, submits
+`10`, runs to the next blocked read, submits `20`, and repeats through `50`.
+The checklist turns green only when the receipts show all of these facts:
 
-to:
+- five submitted lines were consumed by five reads;
+- `nums` is a five-quadword array containing `10, 20, 30, 40, 50`;
+- execution called `read_five`, `readInt`, `sum_array`, and `writeInt` with
+  course-aligned call sites; and
+- stdout ends in `150\n` and the process exits normally.
 
-```asm
-mov 10,%rbx
-```
+The separation matters. The course helper assumes one terminal line per
+`read()` call; supplying all five lines as one piped byte stream does not model
+the assignment's interactive contract.
 
-Choose **Assemble**. Execution controls become unavailable and diagnostic
-`E212` points to line 5: the immediate value is missing `$`. The diagnostic
-suggests `$10`; it does not silently fix your program.
+To inspect the loop rather than run the automated check, choose **Reset**, set
+a breakpoint on `sum5.s:39` (`mov %rax,(%rcx,%rbx,8)`), and choose **Run**.
+When the process first waits, submit `10` and Run again. The machine stops
+before the first array store with `%rax = 10` and `%rbx = 0`. Step the store,
+then repeat with the remaining lines. The same breakpoint will stop at each
+loop iteration because resuming ignores it only once.
 
-Restore the `$`, choose **Assemble**, and confirm that the machine is paused at
-the first instruction with history `0`.
+The supplied program is the assignment's deliberately minimal skeleton, not a
+creative submission. Use **Export workspace** before experimenting. You can
+then add a module, change the computation, or import your own `.s` files and
+restore the complete three-module bundle later.
+
+## Repair common assembly mistakes
+
+The **Practice labs** group contains five editable starters. Each card states
+an observable success condition. Try the diagnostic or machine evidence first,
+then reveal one hint at a time. The final hint is deliberately direct; earlier
+hints name the concept without replacing the line for you.
+
+1. **Repair a missing immediate marker** begins with assembler diagnostic
+   `E212`. Decide whether `60` is meant to be an address or a literal.
+2. **Repair reversed operands** asks which side of `mov source,destination`
+   must be writable.
+3. **Find an accidental wide read** places two neighboring `.long` values in
+   memory. Run the starter and compare `%rdi`'s full value with the shell's
+   low-byte status before changing the access width.
+4. **Keep a loop counter across a call** intends to print `321`, but the helper
+   is allowed to overwrite its caller-saved counter. Inspect `writeInt.s`'s
+   documented clobber and preservation lists.
+5. **Repair call-site alignment** prints the right number while still violating
+   the course ABI. The nonfatal `W401` diagnostic and call receipt report the
+   actual `%rsp` used at the boundary.
+
+After an edit, the Source heading says **edited · assemble to run**. Choose
+**Assemble** before checking the repair; the tool never silently runs stale or
+automatically corrected source. A successful lab reports its evidence rather
+than awarding credit for a particular spelling.
 
 ## Write one tiny program
 
@@ -547,7 +621,9 @@ The keys are shown at the bottom of the screen:
 | `s`, `Enter`, or right arrow | Step one instruction |
 | `n` | Next; step over a call, otherwise step one instruction |
 | `b` or left arrow | Reverse one instruction |
-| `c` | Continue to exit or fault |
+| `c` | Continue to a breakpoint, input wait, exit, fault, or safety limit |
+| `x` | Toggle a breakpoint at the highlighted instruction |
+| `X` | Clear every breakpoint |
 | `i` | Enter one stdin line; Enter submits it and Esc cancels |
 | `r` | Reset to `_start` |
 | `m` | Cycle the right pane through registers, memory/I/O, and stack |
@@ -581,8 +657,24 @@ cargo run -p x86-63-cli -- repl --example firstadd
 
 Enter `step` or the GDB-style alias `si`, then try `next`, `regs`, `memory`,
 `stack`, `output`, `input hello`, `why`, `back`, `run`, `reset`, `help`, and
-`quit`. The browser buttons, TUI keys, and REPL commands all call the same
-execution engine.
+`quit`. Breakpoints accept a current-module line (`break 7`), a linked source
+location (`break readInt.s:39`), or a label (`break parseInt`). Use `info
+breakpoints` to list them and `clear breakpoints` to remove them. The browser
+buttons, TUI keys, and REPL commands all call the same execution engine.
+
+## Export evidence for help
+
+Choose **Export trace** to download a JSON teaching trace. It includes the
+current source modules, build diagnostics, recorded predictions, commands,
+structured execution events, and state projections. A student can attach this
+file when asking for help; it records what happened without generating a
+replacement program. Review the source before sharing if it contains work you
+do not want to distribute.
+
+**Export workspace** is intentionally different: it saves the current linked
+module names and source text without execution history. Import that JSON to
+resume editing, or import individual `.s` files. Use a trace to explain what
+happened; use a workspace to preserve what you were building.
 
 ## Feedback for this prototype
 

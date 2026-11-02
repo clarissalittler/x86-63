@@ -7,11 +7,28 @@ export type Lesson = {
   module_name: string;
   source: string;
   support_modules: LessonModule[];
+  challenge: Challenge | null;
+  collection: "lecture" | "assignment" | "practice";
+  assignment: Assignment | null;
 };
 
 export type LessonModule = {
   module_name: string;
   source: string;
+};
+
+export type Challenge = {
+  goal: string;
+  success: string;
+  hints: string[];
+};
+
+export type Assignment = {
+  goal: string;
+  success: string;
+  requirements: string[];
+  sample_inputs: string[];
+  expected_output: string;
 };
 
 export type SourceLocation = {
@@ -83,6 +100,7 @@ export type MachineView = {
     stderr_escaped: string;
   };
   history_depth: number;
+  breakpoints: SourceLocation[];
 };
 
 export type StackSlotView = {
@@ -150,6 +168,8 @@ export type StepEvent = {
   divisor?: string;
   quotient?: string;
   remainder?: string;
+  location?: SourceLocation;
+  enabled?: boolean;
 };
 
 export type CommandResult = {

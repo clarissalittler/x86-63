@@ -8,6 +8,9 @@ pub enum ReplInput {
     Stack,
     Output,
     Input(String),
+    Breakpoint(String),
+    Breakpoints,
+    ClearBreakpoints,
     Why,
     Help,
     Quit,
@@ -24,6 +27,12 @@ pub fn parse_repl_input(input: &str) -> ReplInput {
     if normalized.starts_with("input ") {
         return ReplInput::Input(trimmed[5..].trim_start().to_string());
     }
+    if normalized == "break" {
+        return ReplInput::Breakpoint(String::new());
+    }
+    if normalized.starts_with("break ") {
+        return ReplInput::Breakpoint(trimmed[5..].trim_start().to_string());
+    }
     match normalized.as_str() {
         "" => ReplInput::Empty,
         "si" | "s" | "step" => ReplInput::Command(Command::Step),
@@ -35,6 +44,8 @@ pub fn parse_repl_input(input: &str) -> ReplInput {
         "mem" | "memory" | "x/data" => ReplInput::Memory,
         "stack" | "x/stack" => ReplInput::Stack,
         "io" | "output" | "stdout" => ReplInput::Output,
+        "breakpoints" | "info breakpoints" => ReplInput::Breakpoints,
+        "clear breakpoints" | "delete breakpoints" => ReplInput::ClearBreakpoints,
         "why" => ReplInput::Why,
         "h" | "help" | "?" => ReplInput::Help,
         "q" | "quit" | "exit" => ReplInput::Quit,
@@ -51,5 +62,10 @@ mod tests {
         assert_eq!(parse_repl_input("si"), ReplInput::Command(Command::Step));
         assert_eq!(parse_repl_input("step"), ReplInput::Command(Command::Step));
         assert_eq!(parse_repl_input("info registers"), ReplInput::Registers);
+        assert_eq!(
+            parse_repl_input("break helper.s:12"),
+            ReplInput::Breakpoint("helper.s:12".to_string())
+        );
+        assert_eq!(parse_repl_input("info breakpoints"), ReplInput::Breakpoints);
     }
 }

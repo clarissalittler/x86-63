@@ -80,6 +80,12 @@ impl Program {
         self.instructions.get(pc)
     }
 
+    pub(crate) fn instruction_at_source_line(&self, module: &str, line: usize) -> Option<usize> {
+        self.instructions.iter().position(|instruction| {
+            instruction.location.module == module && instruction.location.line == line
+        })
+    }
+
     pub(crate) fn entry(&self) -> usize {
         self.entry
     }

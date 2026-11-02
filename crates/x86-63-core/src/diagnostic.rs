@@ -37,4 +37,18 @@ impl Diagnostic {
         self.help = Some(help.into());
         self
     }
+
+    pub(crate) fn warning(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        location: Option<SourceLocation>,
+    ) -> Self {
+        Self {
+            severity: Severity::Warning,
+            code: code.into(),
+            message: message.into(),
+            help: None,
+            location,
+        }
+    }
 }

@@ -4,8 +4,9 @@
 CS201. It runs GNU/AT&T-syntax assembly one instruction at a time and explains
 the resulting register, flag, and process-state changes.
 
-The first four student-testable slices are working. They cover 25 lessons in
-the maintained Lecture 3–6 progression, spanning register arithmetic, data,
+The course-shaped teaching slices now cover 25 maintained lessons in the
+Lecture 3–6 progression, the complete Assignment 2 `sum5` workspace, and five
+repair labs, spanning register arithmetic, data,
 addressing, branches, loops, process I/O, linked helper modules, routines,
 calls, stack frames, integer conversion, and recursion. (Lecture 4's annotated
 repeat of `firstadd.s` is represented by the same Lecture 3 lesson.)
@@ -24,13 +25,18 @@ strict source diagnostics, structured explanations, reset, reversible stepping,
 and real step-over for calls. Memory and stack writes, input consumption,
 branch decisions, process output, and recursive frame chains are reversible
 too. The browser includes guided register, memory, stack, and recursion
-tutorials.
+tutorials; focused **Learn** and full-state **Inspect** modes; signed,
+unsigned, binary, and ASCII interpretations; regroupable memory; prediction
+journaling; progressive challenge hints; and downloadable execution traces.
+Students can set source breakpoints from the assembled gutter, manage linked
+modules locally, export/import complete workspaces, and run Assignment 2's
+five separate input interactions against an evidence-backed rubric checklist.
 
-The maintained Lecture 3–6 compositions now run end to end, including the real
-`readInt.s`, `writeInt.s`, and recursive `fact.s`. Assignment 2 integration,
-breakpoints, and the remaining guide-level instruction variants are the next
-course-shaped work. Unsupported syntax is rejected explicitly instead of being
-guessed or silently repaired.
+The maintained Lecture 3–6 compositions and Assignment 2 now run end to end,
+including the real `readInt.s`, `writeInt.s`, recursive `fact.s`, and `sum5.s`.
+The next compatibility work is the remaining guide-level instruction variants
+and classroom accessibility/polish. Unsupported syntax is rejected explicitly
+instead of being guessed or silently repaired.
 
 ## Try the native version
 
@@ -57,6 +63,7 @@ cargo run -p x86-63-cli -- run --example echo --stdin hello
 cargo run -p x86-63-cli -- tui --example funstack
 cargo run -p x86-63-cli -- tui --example fact --stdin 5
 cargo run -p x86-63-cli -- run --example readwrite --stdin 123
+cargo run -p x86-63-cli -- repl --example sum5
 cargo run -p x86-63-cli -- trace --example firstsub
 ```
 
@@ -84,6 +91,24 @@ Linked lessons expose a source-module chooser and automatically follow control
 flow into `readInt.s` and `writeInt.s`. A static production build is created
 with `npm run web:build`; it has no server-side runtime dependency.
 
+Click the breakpoint circle beside any executable assembled line, then use
+**Run** to stop before it. **Reset** preserves breakpoints; assembling a new
+workspace starts a fresh debugger session. The Source workspace controls can
+add/remove modules, import local `.s` files or an exported workspace JSON, and
+export all linked source modules. Files remain in the browser and are never
+uploaded.
+
+Use **Learn** to show only registers used by the active module plus essential
+course-role registers. Record a prediction before stepping and the browser can
+hold back the resulting machine panes until the student chooses to reveal the
+evidence. Use **Inspect** for the complete architectural state. The **Practice
+labs** group contains five deliberately broken programs covering immediates,
+operand order, access width, caller-saved registers, and stack alignment.
+The separate **Assignment 2** group bundles `sum5.s` with both I/O helpers.
+Its **Run five-line sample** action waits for each blocked read before submitting
+10, 20, 30, 40, and 50, then checks the array, procedure calls, output, stack,
+and exit evidence.
+
 ## Verify the slice
 
 ```sh
@@ -96,7 +121,7 @@ npm run web:build
 ```
 
 The native integration tests and Node/WASM smoke test run all 25 maintained
-lessons and assert register, memory, stack, branch, input, output, fault, and
+lessons, Assignment 2, and five repair labs, asserting register, memory, stack, branch, input, output, fault, and
 exit outcomes, including linked modules, recursive frame chains, integer-I/O
 edge cases, reverse stepping, and 64-bit-safe JSON transport. The differential
 scripts assemble the Lecture 4–6 fixtures with GNU `as`/`ld`, run them, and
@@ -111,6 +136,6 @@ compare their shell statuses and output bytes with the teaching machine.
 - [Product and technical design](docs/product-design.md) specifies the planned
   complete experience and architecture.
 
-The next whole-program product test is Assignment 2's `sum5.s`: accept five
-separate inputs through the real helpers, fill the array, sum it, and print
-`150` for the inputs 10 through 50.
+The Assignment 2 product test accepts five separate inputs through the real
+helpers, fills the array with 10 through 50, calls the summing and output
+procedures, and prints `150` followed by a newline.
