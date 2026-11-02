@@ -625,6 +625,7 @@ The keys are shown at the bottom of the screen:
 | `x` | Toggle a breakpoint at the highlighted instruction |
 | `X` | Clear every breakpoint |
 | `i` | Enter one stdin line; Enter submits it and Esc cancels |
+| `:` | Type a debugger command (`p/x $rax`, `x/4gx $rsp`, `bt`, …) |
 | `r` | Reset to `_start` |
 | `m` | Cycle the right pane through registers, memory/I/O, and stack |
 | `q` or `Esc` | Leave the TUI |
@@ -661,6 +662,42 @@ Enter `step` or the GDB-style alias `si`, then try `next`, `regs`, `memory`,
 location (`break readInt.s:39`), or a label (`break parseInt`). Use `info
 breakpoints` to list them and `clear breakpoints` to remove them. The browser
 buttons, TUI keys, and REPL commands all call the same execution engine.
+
+## Practice the gdb commands from the guide
+
+The assembly guide's gdb table works here with the same spelling, so the habits
+you build carry over to real `gdb`. Type these in the REPL, after `:` in the
+TUI, or in the browser's **Debugger console**:
+
+| Command | What it shows |
+|---|---|
+| `info registers` | every register in hex and signed decimal, plus set flags |
+| `p/x $rax`, `p/d $eax`, `p/t $rbx` | one value in hex, signed decimal, or binary |
+| `p num + 1`, `p/x &num` | a data symbol's value, or its address with `&` |
+| `x/8xb &buff` | eight bytes starting at `buff` |
+| `x/s &msg` | memory at `msg` as a NUL-terminated string |
+| `x/4gx $rsp` | four 8-byte stack slots starting at the top of the stack |
+| `x/3i $pc` | the next three instructions |
+| `bt`, `info frame` | the saved-`%rbp` frame chain and the innermost frame |
+| `set $rdi = 5` | change a register by hand; `back` undoes it |
+
+Load `guidemax` (Assembly guide group) and try `p arrlen`, `x/5dg &arr`, then
+`break skip` and `c` a few times, printing `$rcx` and `$rax` at each stop.
+
+A command script is a text file with one command per line. Replay one with:
+
+```sh
+cargo run -p x86-63-cli -- repl --example fact -x tests/scripts/fact.gdb
+```
+
+Add `--batch` to exit at the end instead of opening the prompt, or type
+`source FILE` at the prompt. In the browser, **Run script…** replays the same
+file. `exec` runs a program the way the assembled executable would, reading
+real stdin:
+
+```sh
+cargo run -p x86-63-cli -- exec --example guidesumn
+```
 
 ## Export evidence for help
 

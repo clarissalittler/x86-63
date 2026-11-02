@@ -44,7 +44,7 @@ pub struct LessonView<'a> {
 }
 
 pub fn lessons() -> &'static [Lesson] {
-    static LESSONS: [Lesson; 31] = [
+    static LESSONS: [Lesson; 40] = [
         Lesson {
             id: "first",
             title: "The deliberately incomplete program",
@@ -280,6 +280,87 @@ pub fn lessons() -> &'static [Lesson] {
             source: include_str!("../../../course-content/assignment2/sum5.s"),
         },
         Lesson {
+            id: "guidelocallabels",
+            title: "Guide · Numeric local labels",
+            lecture: 0,
+            summary: "Reuse `1:` in several routines and follow `1f` forward to the nearest definition below.",
+            prediction: "Inside biglabel1, which `1:` does `jmp 1f` reach?",
+            module_name: "localLabels.s",
+            source: include_str!("../../../course-content/guide/localLabels.s"),
+        },
+        Lesson {
+            id: "guidesign",
+            title: "Guide exercise 1 · Sign of a number",
+            lecture: 0,
+            summary: "Compare against zero and choose one of three exits with two conditional jumps.",
+            prediction: "With %rax = -42, which jumps are skipped and what will `echo $?` print?",
+            module_name: "signOfNumber.s",
+            source: include_str!("../../../course-content/guide/signOfNumber.s"),
+        },
+        Lesson {
+            id: "guidesum",
+            title: "Guide exercise 2 · Sum from 1 to 10",
+            lecture: 0,
+            summary: "Count with inc, test with cmp/jg, and accumulate in %rax.",
+            prediction: "How many times does `add %rcx,%rax` run before `jg done` is taken?",
+            module_name: "sumOneToTen.s",
+            source: include_str!("../../../course-content/guide/sumOneToTen.s"),
+        },
+        Lesson {
+            id: "guidemax",
+            title: "Guide exercise 3 · Max of an array",
+            lecture: 0,
+            summary: "Compute an element count with `(. - arr) / 8` and scan with scaled-index addressing.",
+            prediction: "What value does the assembler give `arrlen`, and which element becomes the max?",
+            module_name: "maxOfArray.s",
+            source: include_str!("../../../course-content/guide/maxOfArray.s"),
+        },
+        Lesson {
+            id: "guideabs",
+            title: "Guide exercise 4 · Absolute value function",
+            lecture: 0,
+            summary: "Pass an argument in %rdi, negate when negative, and return in %rax.",
+            prediction: "Which instruction runs only when the argument is negative?",
+            module_name: "absoluteValue.s",
+            source: include_str!("../../../course-content/guide/absoluteValue.s"),
+        },
+        Lesson {
+            id: "guidelocals",
+            title: "Guide exercise 5 · Function with local variables",
+            lecture: 0,
+            summary: "Store two squared intermediates in a 16-byte frame and subtract them.",
+            prediction: "Which addresses do -8(%rbp) and -16(%rbp) name inside diffsq?",
+            module_name: "localVariables.s",
+            source: include_str!("../../../course-content/guide/localVariables.s"),
+        },
+        Lesson {
+            id: "guidefact",
+            title: "Guide exercise 6 · Recursive factorial",
+            lecture: 0,
+            summary: "Save n in a local slot across each recursive call and multiply on the way back.",
+            prediction: "How many frames are live at the deepest point of fact(5)?",
+            module_name: "recursiveFactorial.s",
+            source: include_str!("../../../course-content/guide/recursiveFactorial.s"),
+        },
+        Lesson {
+            id: "guidesumn",
+            title: "Guide exercise 7 · Sum of 1 to N, with I/O",
+            lecture: 0,
+            summary: "Read N with readInt, count down with test/jz, and print with writeInt.",
+            prediction: "For N = 10, what does `jz sum_done` check on each pass?",
+            module_name: "sumToN.s",
+            source: include_str!("../../../course-content/guide/sumToN.s"),
+        },
+        Lesson {
+            id: "signeddivide",
+            title: "Guide detour · Signed division with cqo and idivq",
+            lecture: 0,
+            summary: "Sign-extend a negative dividend into %rdx before dividing it as a signed value.",
+            prediction: "What would %rdx hold if the program used `xor %rdx,%rdx` instead of cqo?",
+            module_name: "signedDivide.s",
+            source: include_str!("../../../course-content/guide/signedDivide.s"),
+        },
+        Lesson {
             id: "missingimmediate",
             title: "Repair a missing immediate marker",
             lecture: 0,
@@ -340,7 +421,7 @@ pub fn support_modules(id: &str) -> &'static [LessonModule] {
     static IO_HELPERS: [LessonModule; 2] = [READ_INT, WRITE_INT];
     static WRITE_HELPER: [LessonModule; 1] = [WRITE_INT];
     match id {
-        "readwrite" | "fact" | "sum5" => &IO_HELPERS,
+        "readwrite" | "fact" | "sum5" | "guidesumn" => &IO_HELPERS,
         "sumlooparray" | "callersavedloop" | "misalignedcall" => &WRITE_HELPER,
         _ => &[],
     }
@@ -365,9 +446,24 @@ pub fn assignment(id: &str) -> Option<&'static Assignment> {
     }
 }
 
+/// Complete programs from the CS201 assembly guide (`assemblyGuide.org`).
+pub const GUIDE_LESSONS: &[&str] = &[
+    "guidelocallabels",
+    "guidesign",
+    "guidesum",
+    "guidemax",
+    "guideabs",
+    "guidelocals",
+    "guidefact",
+    "guidesumn",
+    "signeddivide",
+];
+
 pub fn collection(id: &str, lecture: u8) -> &'static str {
     if assignment(id).is_some() {
         "assignment"
+    } else if GUIDE_LESSONS.contains(&id) {
+        "guide"
     } else if challenge(id).is_some() {
         "practice"
     } else if lecture > 0 {

@@ -43,6 +43,12 @@ jobs:
       - name: Run WebAssembly protocol tests
         run: npm run wasm:test
 
+      - name: Check native and WebAssembly command-script parity
+        run: npm run parity:test
+
+      - name: Compare guide programs with GNU as/ld
+        run: ./scripts/differential-guide.sh
+
       - name: Build the browser app
         run: npm --workspace @x86-63/web run build
 

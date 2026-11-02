@@ -17,7 +17,7 @@ assert.deepEqual(
   lessons.slice(0, 4).map((lesson) => lesson.id),
   ["first", "firstfixed", "firstadd", "firstsub"]
 );
-assert.equal(lessons.length, 31);
+assert.equal(lessons.length, 40);
 assert.deepEqual(
   lessons.filter((lesson) => lesson.collection === "practice").map((lesson) => lesson.id),
   [
@@ -36,6 +36,20 @@ assert.ok(
 assert.deepEqual(
   lessons.filter((lesson) => lesson.collection === "assignment").map((lesson) => lesson.id),
   ["sum5"]
+);
+assert.deepEqual(
+  lessons.filter((lesson) => lesson.collection === "guide").map((lesson) => lesson.id),
+  [
+    "guidelocallabels",
+    "guidesign",
+    "guidesum",
+    "guidemax",
+    "guideabs",
+    "guidelocals",
+    "guidefact",
+    "guidesumn",
+    "signeddivide"
+  ]
 );
 
 function lessonModules(lesson) {
@@ -77,7 +91,16 @@ const expectedStatus = new Map([
   ["sum5", { kind: "exited", shell_status: 0 }],
   ["wrongwidth", { kind: "exited", shell_status: 255 }],
   ["callersavedloop", { kind: "exited", shell_status: 0 }],
-  ["misalignedcall", { kind: "exited", shell_status: 0 }]
+  ["misalignedcall", { kind: "exited", shell_status: 0 }],
+  ["guidelocallabels", { kind: "exited", shell_status: 0 }],
+  ["guidesign", { kind: "exited", shell_status: 255 }],
+  ["guidesum", { kind: "exited", shell_status: 55 }],
+  ["guidemax", { kind: "exited", shell_status: 11 }],
+  ["guideabs", { kind: "exited", shell_status: 42 }],
+  ["guidelocals", { kind: "exited", shell_status: 60 }],
+  ["guidefact", { kind: "exited", shell_status: 120 }],
+  ["guidesumn", { kind: "exited", shell_status: 0 }],
+  ["signeddivide", { kind: "exited", shell_status: 7 }]
 ]);
 
 const expectedBuildError = new Map([
@@ -98,11 +121,11 @@ for (const lesson of lessons) {
   }
   const session = new WasmSession(JSON.stringify(lessonModules(lesson)));
   const initial = JSON.parse(session.view_json());
-  assert.equal(initial.protocol_version, 5);
+  assert.equal(initial.protocol_version, 6);
   assert.equal(initial.status.kind, "paused");
 
-  if (["echo", "readwrite", "fact"].includes(lesson.id)) {
-    const text = lesson.id === "fact" ? "5" : lesson.id === "readwrite" ? "123" : "browser";
+  if (["echo", "readwrite", "fact", "guidesumn"].includes(lesson.id)) {
+    const text = { fact: "5", readwrite: "123", guidesumn: "10" }[lesson.id] ?? "browser";
     session.execute(JSON.stringify({ SubmitInput: { text } }));
   }
 
@@ -273,4 +296,14 @@ try {
 assert.equal(buildError.diagnostics[0].code, "E212");
 assert.match(buildError.diagnostics[0].help, /\$60/);
 
-console.log("WASM protocol smoke test passed for 25 Lecture 3–6 lessons, Assignment 2, and 5 repair labs.");
+if (lessons.some((lesson) => lesson.id === "guidesumn")) {
+  const guide = lessons.find((lesson) => lesson.id === "guidesumn");
+  const session = new WasmSession(JSON.stringify(lessonModules(guide)));
+  session.execute(JSON.stringify({ SubmitInput: { text: "10" } }));
+  const result = JSON.parse(session.execute(JSON.stringify({ Continue: { max_steps: 2_000 } })));
+  assert.equal(result.view.io.stdout_escaped, "55");
+}
+
+console.log(
+  "WASM protocol smoke test passed for 25 Lecture 3–6 lessons, Assignment 2, 9 assembly-guide programs, and 5 repair labs."
+);

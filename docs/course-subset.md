@@ -107,9 +107,9 @@ where GNU `as` can infer it from a register operand.
 | Family | Required spellings/behavior |
 |---|---|
 | Data movement | `mov`, `movb`, `movl`, `movq`, `movabsq`, `movzbl`, `movzbq`, `lea`, `leaq` |
-| Arithmetic | `add`, `addb`, `addl`, `addq`, `sub`, `subq`, `imul`, `divq`, `idivq`, `cqo`, `negq`, `inc`, `incq`, `dec`, `decq` |
+| Arithmetic | `add`, `addb`, `addl`, `addq`, `sub`, `subq`, `imul`, `div`/`divq`, `idiv`/`idivq`, `cqo`/`cqto`, `cltq`, `negq`, `inc`, `incq`, `dec`, `decq` |
 | Logic/flags | `xor`, `xorq`, `cmp`, `cmpq`, `testq` |
-| Control | `jmp`, `je`, `jne`, `jl`, `jle`, `jg`, `jge`, `jb`, `jbe`, `ja`, `jae`, `jno`, `call`, `ret` |
+| Control | `jmp`, `je`/`jz`, `jne`/`jnz`, `jl`, `jle`, `jg`, `jge`, `jb`/`jc`, `jbe`, `ja`, `jae`/`jnc`, `jo`, `jno`, `js`, `jns`, `jp`, `jnp` and their `jn…` synonyms, `call`, `ret` |
 | Stack | `push`, `pushq`, `pop`, `popq`, `leave` |
 | Kernel boundary | `syscall` |
 
@@ -147,7 +147,10 @@ Release 1 implements only the syscalls used by the guide:
 
 Terminal input is submitted a line at a time by default, including the newline.
 That matches how `readInt` is taught. A later raw/pipe mode can deliberately
-reproduce the assignment warning that several lines may arrive in one `read`.
+reproduce the assignment warning that several lines may arrive in one `read`:
+natively, piping all five `sum5` inputs at once lets the first 128-byte read
+consume every line, and a later read then reaches end of file and the program
+segfaults, while the same inputs typed (or paced) one line at a time succeed.
 
 ## Semantic details that cannot be approximated
 
@@ -158,7 +161,10 @@ reproduce the assignment warning that several lines may arrive in one `read`.
 - Signed and unsigned branches use their real flag predicates.
 - `inc`/`dec` do not change `CF`.
 - `divq` consumes `%rdx:%rax`, produces quotient in `%rax` and remainder in
-  `%rdx`, and faults on division by zero or quotient overflow.
+  `%rdx`, and faults on division by zero or quotient overflow. `idivq` does the
+  same with signed values; its quotient truncates toward zero and its remainder
+  takes the dividend's sign, so `cqo` (not `xor %rdx,%rdx`) must prepare a
+  negative dividend.
 - Memory is little-endian and reads/writes honor the instruction width.
 - `.rodata` is not writable, `.bss` starts zeroed, and unmapped accesses fault.
 - Falling off the last instruction is a fault; there is no implicit exit.

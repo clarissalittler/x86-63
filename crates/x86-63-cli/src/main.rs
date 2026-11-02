@@ -3,6 +3,7 @@ mod repl;
 mod tui;
 
 use std::fs;
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -25,13 +26,32 @@ enum Mode {
     /// Open the full-screen terminal visualizer (the default mode).
     Tui(Input),
     /// Open a line-oriented, GDB-like REPL.
-    Repl(Input),
+    Repl {
+        #[command(flatten)]
+        input: Input,
+        /// Replay a command file before the prompt, like `gdb -x` (repeatable).
+        #[arg(short = 'x', long = "commands", value_name = "SCRIPT")]
+        commands: Vec<PathBuf>,
+        /// Exit after the command files instead of opening the prompt.
+        #[arg(long, requires = "commands")]
+        batch: bool,
+    },
     /// Run until exit, fault, or the safety limit.
     Run(Input),
+    /// Behave like the assembled executable: program output goes to stdout and
+    /// stderr, reads take lines from stdin, and the exit status matches.
+    Exec(Input),
     /// Parse and validate source without running it.
     Check(Input),
-    /// Emit one versioned JSON object per executed instruction.
-    Trace(Input),
+    /// Emit one versioned JSON object per executed instruction, or per line of
+    /// a command script with `--commands`.
+    Trace {
+        #[command(flatten)]
+        input: Input,
+        /// Replay this command file and emit each line's response instead.
+        #[arg(short = 'x', long = "commands", value_name = "SCRIPT")]
+        commands: Option<PathBuf>,
+    },
     /// List the bundled course examples.
     Examples,
 }
@@ -114,7 +134,36 @@ fn try_main() -> Result<(), String> {
             display::print_output(&result.view);
             Ok(())
         }
-        Mode::Trace(input) => {
+        Mode::Exec(input) => {
+            let status = exec(build_session(&input)?, input.max_steps)?;
+            std::process::exit(i32::from(status));
+        }
+        Mode::Trace {
+            input,
+            commands: Some(script),
+        } => {
+            let mut session = build_session(&input)?;
+            let script = fs::read_to_string(&script)
+                .map_err(|error| format!("could not read {}: {error}", script.display()))?;
+            for line in repl::script_lines(&script) {
+                let response = x86_63_core::run_repl_line(&mut session, line);
+                // Written by hand so the response keeps its struct field order,
+                // which the native/WASM parity check compares byte for byte.
+                println!(
+                    "{{\"line\":{},\"response\":{}}}",
+                    serde_json::to_string(line).map_err(|error| error.to_string())?,
+                    serde_json::to_string(&response).map_err(|error| error.to_string())?
+                );
+                if response.quit {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        Mode::Trace {
+            input,
+            commands: None,
+        } => {
             let mut session = build_session(&input)?;
             let mut steps = 0;
             while matches!(session.view().status, MachineStatus::Paused) && steps < input.max_steps
@@ -134,8 +183,63 @@ fn try_main() -> Result<(), String> {
             }
             Ok(())
         }
-        Mode::Repl(input) => repl::run(build_session(&input)?),
+        Mode::Repl {
+            input,
+            commands,
+            batch,
+        } => repl::run(build_session(&input)?, &commands, batch),
         Mode::Tui(input) => tui::run(build_session(&input)?).map_err(|error| error.to_string()),
+    }
+}
+
+/// Runs to completion like a native process and returns its shell status.
+/// Faults map to the status a shell reports for the matching signal (SIGFPE
+/// for division faults, SIGSEGV otherwise) so differential checks can compare.
+fn exec(mut session: Session, max_steps: usize) -> Result<u8, String> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout().lock();
+    let mut stderr = io::stderr().lock();
+    let (mut written_out, mut written_err) = (0, 0);
+    loop {
+        let result = session.execute(Command::Continue { max_steps });
+        let io_view = &result.view.io;
+        stdout
+            .write_all(&io_view.stdout_bytes[written_out..])
+            .and_then(|()| stdout.flush())
+            .map_err(|error| error.to_string())?;
+        stderr
+            .write_all(&io_view.stderr_bytes[written_err..])
+            .map_err(|error| error.to_string())?;
+        written_out = io_view.stdout_bytes.len();
+        written_err = io_view.stderr_bytes.len();
+        match &result.view.status {
+            MachineStatus::Exited { shell_status, .. } => return Ok(*shell_status),
+            MachineStatus::Faulted { code, message } => {
+                eprintln!("x86-63: {code}: {message}");
+                return Ok(if code.starts_with("division") {
+                    136
+                } else {
+                    139
+                });
+            }
+            MachineStatus::WaitingForInput { .. } => {
+                let mut line = String::new();
+                if stdin
+                    .lock()
+                    .read_line(&mut line)
+                    .map_err(|error| error.to_string())?
+                    == 0
+                {
+                    return Err("stdin ended while the program was waiting to read".to_string());
+                }
+                session.execute(Command::SubmitInput { text: line });
+            }
+            MachineStatus::Paused => {
+                return Err(format!(
+                    "stopped at the {max_steps}-instruction safety limit"
+                ));
+            }
+        }
     }
 }
 

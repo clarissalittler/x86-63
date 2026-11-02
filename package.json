@@ -9,6 +9,7 @@
     "wasm:test": "npm run wasm:build && npm --workspace @x86-63/web run test:wasm",
     "web:dev": "npm run wasm:build && npm --workspace @x86-63/web run dev",
     "web:build": "npm run wasm:build && npm --workspace @x86-63/web run build",
-    "web:preview": "npm --workspace @x86-63/web run preview"
+    "web:preview": "npm --workspace @x86-63/web run preview",
+    "parity:test": "cargo build --quiet -p x86-63-cli && npm run wasm:build && node apps/web/scripts/parity.mjs"
   }
 }

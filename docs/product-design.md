@@ -227,13 +227,15 @@ bridge into the real debugger rather than a parallel command language.
 | `ni`, `next` | execute through a call as one source-level action |
 | `back`, `reverse-stepi` | undo one deterministic transition |
 | `c`, `continue` | run to breakpoint, input wait, exit, fault, or step limit |
-| `break <label|line|module:line>` | toggle a breakpoint by symbol or source line |
+| `break <label|line|module:line|*addr>` | toggle a breakpoint by symbol, source line, or address |
 | `info breakpoints`, `clear breakpoints` | list or remove source breakpoints |
 | `info registers` | show machine registers |
 | `p/x`, `p/d`, `p/t <expr>` | inspect expression in hex/decimal/binary |
 | `x/8xb &buff`, `x/4gx $rsp`, `x/s &msg` | GDB-like memory examination |
-| `stdin <escaped text>` | enqueue bytes for a blocked/future read |
+| `stdin <text>`, `input <text>` | submit one line for a blocked/future read |
 | `set $rax = 10` | explicitly mutate state, recorded in history |
+| `bt`, `info frame` | saved-`%rbp` frame chain and the innermost frame |
+| `source FILE`, `repl -x FILE` | replay a command script |
 | `why` | focus the explanation for the current/previous transition |
 | `asm <instruction>` | execute one instruction in scratch mode |
 | `help [topic]` | command and course-subset help |
@@ -254,8 +256,10 @@ REPL commands:
 x86-63 tui   program.s [helper.s ...]     # default interactive full screen
 x86-63 repl  program.s [helper.s ...]     # line-oriented interactive mode
 x86-63 run   program.s [helper.s ...]     # run to exit/input/fault
+x86-63 exec  program.s [helper.s ...]     # act like the executable (real stdin/stdout/status)
 x86-63 check program.s [helper.s ...]     # parse/link/lint only
-x86-63 trace --format jsonl program.s     # stable machine-readable events
+x86-63 trace program.s                    # stable machine-readable events (JSONL)
+x86-63 trace -x script.gdb program.s      # one JSON response per script line
 ```
 
 `run`, `check`, and `trace` make the native surface useful in assignment

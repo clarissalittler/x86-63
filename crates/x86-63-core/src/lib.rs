@@ -1,4 +1,5 @@
 mod diagnostic;
+mod expression;
 mod machine;
 mod parser;
 mod program;
@@ -14,5 +15,5 @@ pub use protocol::{
     Command, CommandResult, FlagsView, IoView, MachineView, MemoryView, PROTOCOL_VERSION,
     RegisterView, StackFrameView, StackSlotView, StackView, StepEvent,
 };
-pub use repl::{ReplInput, parse_repl_input};
+pub use repl::{ReplInput, ReplResponse, help_text, parse_repl_input, run_repl_line};
 pub use session::{BuildError, Session};

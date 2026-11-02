@@ -8,7 +8,7 @@ export type Lesson = {
   source: string;
   support_modules: LessonModule[];
   challenge: Challenge | null;
-  collection: "lecture" | "assignment" | "practice";
+  collection: "lecture" | "assignment" | "guide" | "practice";
   assignment: Assignment | null;
 };
 
@@ -168,6 +168,7 @@ export type StepEvent = {
   divisor?: string;
   quotient?: string;
   remainder?: string;
+  signed?: boolean;
   location?: SourceLocation;
   enabled?: boolean;
 };
@@ -190,4 +191,10 @@ export type ProgramView = {
   data_base: string;
   data_size: number;
   entry: number;
+};
+
+export type ReplResponse = {
+  output: string;
+  result: CommandResult | null;
+  quit: boolean;
 };

@@ -20,3 +20,10 @@ lesson manifest links it with the maintained Lecture 6 `readInt.s` and
 reads before submitting 10, 20, 30, 40, and 50; this preserves the assignment's
 line-oriented terminal contract and verifies the resulting array and `150\n`
 output.
+
+`guide/` contains the complete, runnable programs from the CS201
+`assemblyGuide.org`: the numeric-local-label example and Exercises 1–7,
+copied verbatim apart from removing the Org indentation. `signedDivide.s` is
+purpose-built for the guide's `div`/`idiv` detour, which describes `cqo` and
+`idivq` without a full program. `scripts/differential-guide.sh` checks all nine
+against GNU `as`/`ld`.

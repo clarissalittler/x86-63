@@ -274,7 +274,12 @@ pub(crate) enum JumpCondition {
     BelowOrEqual,
     Above,
     AboveOrEqual,
+    Overflow,
     NoOverflow,
+    Sign,
+    NoSign,
+    Parity,
+    NoParity,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -340,9 +345,14 @@ pub(crate) enum Operation {
     Div {
         source: Operand,
         width: u8,
+        signed: bool,
+    },
+    SignExtendAccumulator {
+        width: u8,
     },
     Jump {
         condition: JumpCondition,
+        mnemonic: String,
         target: usize,
         target_label: String,
     },
@@ -500,6 +510,7 @@ impl Machine {
             stderr_len_before,
             stdin_cursor_before,
             stdin_cursor_after: self.stdin_cursor,
+            manual: false,
         };
         let completed = !matches!(self.status, MachineStatus::WaitingForInput { .. });
         ExecutedStep {
@@ -647,14 +658,20 @@ impl Machine {
                 destination,
                 width,
             } => self.apply_test(source, destination, *width, events),
-            Operation::Div { source, width } => {
-                self.apply_div(source, *width, register_writes, events)
+            Operation::Div {
+                source,
+                width,
+                signed,
+            } => self.apply_div(source, *width, *signed, register_writes, events),
+            Operation::SignExtendAccumulator { width } => {
+                Ok(self.apply_sign_extend_accumulator(*width, register_writes, events))
             }
             Operation::Jump {
                 condition,
+                mnemonic,
                 target,
                 target_label,
-            } => Ok(self.apply_jump(*condition, *target, target_label, events)),
+            } => Ok(self.apply_jump(*condition, mnemonic, *target, target_label, events)),
             Operation::Call {
                 target,
                 target_label,
@@ -1068,54 +1085,121 @@ impl Machine {
         &mut self,
         source: &Operand,
         width: u8,
+        signed: bool,
         register_writes: &mut Vec<RegisterWriteDelta>,
         events: &mut Vec<StepEvent>,
     ) -> Result<String, RuntimeFault> {
+        let mnemonic = if signed { "idivq" } else { "divq" };
         if width != 64 {
             return Err(RuntimeFault::new(
                 "unsupported_division_width",
-                "this Lecture 6 slice models the divq form used by writeInt",
+                "this teaching machine models the 64-bit divq and idivq forms",
             ));
         }
         let divisor = self.read_operand(source, width, events)?;
         if divisor == 0 {
             return Err(RuntimeFault::new(
                 "division_by_zero",
-                "divq divisor is zero",
+                format!("{mnemonic} divisor is zero"),
             ));
         }
         let rax = RegisterRef::parse("rax").unwrap();
         let rdx = RegisterRef::parse("rdx").unwrap();
         let low = self.read_register(rax, events);
         let high = self.read_register(rdx, events);
-        let dividend = (u128::from(high) << 64) | u128::from(low);
-        let quotient = dividend / u128::from(divisor);
-        if quotient > u128::from(u64::MAX) {
-            return Err(RuntimeFault::new(
-                "division_overflow",
-                "divq quotient does not fit in %rax",
-            ));
-        }
-        let remainder = dividend % u128::from(divisor);
-        self.write_register(rax, quotient as u64, register_writes, events);
-        self.write_register(rdx, remainder as u64, register_writes, events);
+        let raw_dividend = (u128::from(high) << 64) | u128::from(low);
+        let (quotient, remainder, dividend_text, divisor_text) = if signed {
+            let dividend = raw_dividend as i128;
+            let signed_divisor = i128::from(divisor as i64);
+            let quotient = dividend
+                .checked_div(signed_divisor)
+                .filter(|quotient| i64::try_from(*quotient).is_ok())
+                .ok_or_else(|| {
+                    RuntimeFault::new(
+                        "division_overflow",
+                        "idivq quotient does not fit in signed %rax; sign-extend %rax into %rdx with cqo first",
+                    )
+                })?;
+            let remainder = dividend % signed_divisor;
+            (
+                quotient as i64 as u64,
+                remainder as i64 as u64,
+                dividend.to_string(),
+                signed_divisor.to_string(),
+            )
+        } else {
+            let quotient = raw_dividend / u128::from(divisor);
+            if quotient > u128::from(u64::MAX) {
+                return Err(RuntimeFault::new(
+                    "division_overflow",
+                    "divq quotient does not fit in %rax; zero %rdx first",
+                ));
+            }
+            let remainder = raw_dividend % u128::from(divisor);
+            (
+                quotient as u64,
+                remainder as u64,
+                raw_dividend.to_string(),
+                divisor.to_string(),
+            )
+        };
+        self.write_register(rax, quotient, register_writes, events);
+        self.write_register(rdx, remainder, register_writes, events);
         events.push(StepEvent::Division {
             dividend_high: hex64(high),
             dividend_low: hex64(low),
             divisor: hex64(divisor),
-            quotient: hex64(quotient as u64),
-            remainder: hex64(remainder as u64),
+            quotient: hex64(quotient),
+            remainder: hex64(remainder),
             width,
+            signed,
         });
+        let (quotient_text, remainder_text) = if signed {
+            (
+                (quotient as i64).to_string(),
+                (remainder as i64).to_string(),
+            )
+        } else {
+            (quotient.to_string(), remainder.to_string())
+        };
         Ok(format!(
-            "divq divided %rdx:%rax ({dividend}) by {divisor}; quotient {} went to %rax and remainder {} to %rdx.",
-            quotient, remainder
+            "{mnemonic} divided %rdx:%rax ({dividend_text}) by {divisor_text} as {} integers; quotient {quotient_text} went to %rax and remainder {remainder_text} to %rdx.",
+            if signed { "signed" } else { "unsigned" }
         ))
+    }
+
+    fn apply_sign_extend_accumulator(
+        &mut self,
+        width: u8,
+        register_writes: &mut Vec<RegisterWriteDelta>,
+        events: &mut Vec<StepEvent>,
+    ) -> String {
+        let rax = RegisterRef::parse("rax").unwrap();
+        if width == 128 {
+            let rdx = RegisterRef::parse("rdx").unwrap();
+            let value = self.read_register(rax, events);
+            let extension = if (value as i64) < 0 { u64::MAX } else { 0 };
+            self.write_register(rdx, extension, register_writes, events);
+            return format!(
+                "cqo copied the sign bit of %rax ({}) into every bit of %rdx, so %rdx:%rax now holds the same signed value as a 128-bit dividend for idivq.",
+                if extension == 0 { "0" } else { "1" }
+            );
+        }
+        let eax = RegisterRef::parse("eax").unwrap();
+        let value = self.read_register(eax, events);
+        let extended = i64::from(value as u32 as i32) as u64;
+        self.write_register(rax, extended, register_writes, events);
+        format!(
+            "cltq sign-extended %eax ({}) to all 64 bits of %rax ({}).",
+            value as u32 as i32,
+            hex64(extended)
+        )
     }
 
     fn apply_jump(
         &mut self,
         condition: JumpCondition,
+        mnemonic: &str,
         target: usize,
         target_label: &str,
         events: &mut Vec<StepEvent>,
@@ -1126,14 +1210,18 @@ impl Machine {
             self.pc = target;
         }
         events.push(StepEvent::Branch {
-            condition: condition.mnemonic().to_string(),
+            condition: mnemonic.to_string(),
             predicate: predicate.clone(),
             target: target_label.to_string(),
             taken,
         });
+        let alias = if mnemonic == condition.mnemonic() {
+            String::new()
+        } else {
+            format!(" (another spelling of {})", condition.mnemonic())
+        };
         format!(
-            "{} checks {}. The predicate is {}, so the branch to `{}` is {}.",
-            condition.mnemonic(),
+            "{mnemonic}{alias} checks {}. The predicate is {}, so the branch to `{}` is {}.",
             condition.meaning(),
             predicate,
             target_label,
@@ -1586,6 +1674,48 @@ impl Machine {
             .map(|(name, _)| name.clone())
     }
 
+    /// Reads mapped data or stack bytes without recording an event, for the
+    /// debugger's `x` and `print` queries.
+    pub(crate) fn peek(&self, address: u64, count: usize) -> Option<&[u8]> {
+        match self.mapped_range(address, count).ok()? {
+            MappedRange::Data(range) => Some(&self.memory[range]),
+            MappedRange::Stack(range) => Some(&self.stack[range]),
+        }
+    }
+
+    /// Applies a debugger `set $reg = value` as a reversible history entry
+    /// that changes only the register; the program counter does not move.
+    pub(crate) fn set_register(
+        &mut self,
+        register: RegisterRef,
+        value: u64,
+        location: SourceLocation,
+    ) -> (StepDelta, Vec<StepEvent>) {
+        let mut register_writes = Vec::new();
+        let mut events = Vec::new();
+        let status = self.status.clone();
+        let stdout_len_before = self.stdout.len();
+        let stderr_len_before = self.stderr.len();
+        self.write_register(register, value, &mut register_writes, &mut events);
+        let delta = StepDelta {
+            location,
+            pc_before: self.pc,
+            pc_after: self.pc,
+            status_before: status.clone(),
+            status_after: status,
+            flags_before: self.flags,
+            flags_after: self.flags,
+            register_writes,
+            memory_writes: Vec::new(),
+            stdout_len_before,
+            stderr_len_before,
+            stdin_cursor_before: self.stdin_cursor,
+            stdin_cursor_after: self.stdin_cursor,
+            manual: true,
+        };
+        (delta, events)
+    }
+
     pub(crate) fn undo(&mut self, delta: &StepDelta) {
         for write in delta.register_writes.iter().rev() {
             self.registers
@@ -1688,7 +1818,12 @@ impl JumpCondition {
             Self::BelowOrEqual => "jbe",
             Self::Above => "ja",
             Self::AboveOrEqual => "jae",
+            Self::Overflow => "jo",
             Self::NoOverflow => "jno",
+            Self::Sign => "js",
+            Self::NoSign => "jns",
+            Self::Parity => "jp",
+            Self::NoParity => "jnp",
         }
     }
 
@@ -1705,7 +1840,12 @@ impl JumpCondition {
             Self::BelowOrEqual => "unsigned below-or-equal (CF = 1 or ZF = 1)",
             Self::Above => "unsigned above (CF = 0 and ZF = 0)",
             Self::AboveOrEqual => "unsigned above-or-equal (CF = 0)",
+            Self::Overflow => "signed overflow (OF = 1)",
             Self::NoOverflow => "no signed overflow (OF = 0)",
+            Self::Sign => "a negative result (SF = 1)",
+            Self::NoSign => "a non-negative result (SF = 0)",
+            Self::Parity => "even parity in the low result byte (PF = 1)",
+            Self::NoParity => "odd parity in the low result byte (PF = 0)",
         }
     }
 
@@ -1722,7 +1862,12 @@ impl JumpCondition {
             Self::BelowOrEqual => flags.cf || flags.zf,
             Self::Above => !flags.cf && !flags.zf,
             Self::AboveOrEqual => !flags.cf,
+            Self::Overflow => flags.of,
             Self::NoOverflow => !flags.of,
+            Self::Sign => flags.sf,
+            Self::NoSign => !flags.sf,
+            Self::Parity => flags.pf,
+            Self::NoParity => !flags.pf,
         }
     }
 
@@ -1753,7 +1898,12 @@ impl JumpCondition {
             }
             Self::Above => format!("CF={} and ZF={}", bit(flags.cf), bit(flags.zf)),
             Self::AboveOrEqual => format!("CF={} (needs 0)", bit(flags.cf)),
+            Self::Overflow => format!("OF={}", bit(flags.of)),
             Self::NoOverflow => format!("OF={} (needs 0)", bit(flags.of)),
+            Self::Sign => format!("SF={}", bit(flags.sf)),
+            Self::NoSign => format!("SF={} (needs 0)", bit(flags.sf)),
+            Self::Parity => format!("PF={}", bit(flags.pf)),
+            Self::NoParity => format!("PF={} (needs 0)", bit(flags.pf)),
         }
     }
 }
@@ -1900,6 +2050,8 @@ pub(crate) struct StepDelta {
     stdout_len_before: usize,
     stderr_len_before: usize,
     stdin_cursor_before: usize,
+    /// True for a debugger `set`, which changes state without running code.
+    pub(crate) manual: bool,
     #[allow(dead_code)]
     stdin_cursor_after: usize,
 }

@@ -111,9 +111,11 @@ pub fn print_result(result: &CommandResult) {
                 divisor,
                 quotient,
                 remainder,
+                signed,
                 ..
             } => println!(
-                "  div {dividend_high}:{dividend_low} by {divisor}: quotient {quotient}, remainder {remainder}"
+                "  {} {dividend_high}:{dividend_low} by {divisor}: quotient {quotient}, remainder {remainder}",
+                if *signed { "idiv" } else { "div" }
             ),
             StepEvent::Return {
                 return_address,

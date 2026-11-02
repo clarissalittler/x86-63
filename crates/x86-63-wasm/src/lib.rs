@@ -32,6 +32,12 @@ impl WasmSession {
         serde_json::to_string(&self.inner.execute(command)).map_err(js_error)
     }
 
+    /// Runs one GDB-style REPL line (`si`, `p/x $rax`, `x/8xb &buff`, ...) and
+    /// returns the shared `ReplResponse` JSON used by the native REPL.
+    pub fn repl(&mut self, line: &str) -> Result<String, JsValue> {
+        serde_json::to_string(&x86_63_core::run_repl_line(&mut self.inner, line)).map_err(js_error)
+    }
+
     pub fn view_json(&self) -> Result<String, JsValue> {
         serde_json::to_string(&self.inner.view()).map_err(js_error)
     }

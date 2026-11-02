@@ -1,3 +1,5 @@
+mod inspect;
+
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -36,6 +38,7 @@ pub struct Session {
     last_explanation: String,
     breakpoints: BTreeSet<usize>,
     breakpoint_resume_pc: Option<usize>,
+    print_count: usize,
 }
 
 impl Session {
@@ -50,6 +53,7 @@ impl Session {
                 .to_string(),
             breakpoints: BTreeSet::new(),
             breakpoint_resume_pc: None,
+            print_count: 0,
         })
     }
 
@@ -63,6 +67,7 @@ impl Session {
             Command::SubmitInput { text } => self.submit_input(&text),
             Command::ToggleBreakpoint { module, line } => self.toggle_breakpoint(&module, line),
             Command::ClearBreakpoints => self.clear_breakpoints(),
+            Command::SetRegister { register, value } => self.set_register(&register, &value),
         }
     }
 
@@ -355,11 +360,58 @@ impl Session {
         let location = delta.location.clone();
         let mut events = delta.reversed_events();
         self.machine.undo(&delta);
-        self.last_explanation = format!(
-            "Reversed the instruction at {}:{} and restored its previous machine state.",
-            location.module, location.line
-        );
+        self.last_explanation = if delta.manual {
+            "Undid the manual `set` and restored the register's previous value.".to_string()
+        } else {
+            format!(
+                "Reversed the instruction at {}:{} and restored its previous machine state.",
+                location.module, location.line
+            )
+        };
         events.push(StepEvent::Reversed { location });
+        self.result(0, events, Vec::new())
+    }
+
+    fn set_register(&mut self, register: &str, value: &str) -> CommandResult {
+        let failure = |session: &Self, message: String| {
+            session.result(
+                0,
+                Vec::new(),
+                vec![Diagnostic::error("E305", message, None)],
+            )
+        };
+        if matches!(
+            self.machine.status,
+            crate::MachineStatus::Exited { .. } | crate::MachineStatus::Faulted { .. }
+        ) {
+            return failure(
+                self,
+                "the process has halted; use `back` or `reset` before changing registers"
+                    .to_string(),
+            );
+        }
+        let register = match self.register_for_set(register) {
+            Ok(register) => register,
+            Err(message) => return failure(self, message),
+        };
+        let value = match self.evaluate_for_set(value) {
+            Ok(value) => value,
+            Err(message) => return failure(self, message),
+        };
+        let Some(location) = self
+            .program
+            .instruction(self.machine.pc)
+            .map(|instruction| instruction.location.clone())
+        else {
+            return failure(self, "there is no current instruction".to_string());
+        };
+        let (delta, events) = self.machine.set_register(register, value, location);
+        self.history.push(delta);
+        self.last_explanation = format!(
+            "set changed %{} to {} by hand. This is recorded in history, so `back` undoes it; the next instruction has not run.",
+            register.name(),
+            hex64(self.machine.registers.read(register))
+        );
         self.result(0, events, Vec::new())
     }
 
@@ -676,6 +728,90 @@ mod tests {
         assert_eq!(
             reversed.view.next_text.as_deref().map(str::trim),
             Some("divq %rbx")
+        );
+    }
+
+    #[test]
+    fn idivq_after_cqo_divides_signed_values() {
+        let mut signed = session(
+            ".text\n.global _start\n_start:\n mov $-7,%rax\n cqo\n mov $2,%rbx\n idivq %rbx\n mov $60,%rax\n syscall\n",
+        );
+        signed.execute(Command::Step);
+        let extended = signed.execute(Command::Step);
+        assert_eq!(register(&extended.view, "rdx"), "0xffffffffffffffff");
+        signed.execute(Command::Step);
+        let division = signed.execute(Command::Step);
+        assert_eq!(register(&division.view, "rax"), "0xfffffffffffffffd");
+        assert_eq!(register(&division.view, "rdx"), "0xffffffffffffffff");
+        assert!(
+            division
+                .events
+                .iter()
+                .any(|event| matches!(event, StepEvent::Division { signed: true, .. }))
+        );
+        assert!(division.explanation.contains("quotient -3"));
+        assert!(division.explanation.contains("remainder -1"));
+
+        let mut overflow = session(
+            ".text\n.global _start\n_start:\n movabsq $-9223372036854775808,%rax\n cqo\n mov $-1,%rbx\n idiv %rbx\n",
+        );
+        let fault = overflow.execute(Command::Continue { max_steps: 10 });
+        assert!(matches!(
+            fault.view.status,
+            MachineStatus::Faulted { ref code, .. } if code == "division_overflow"
+        ));
+    }
+
+    #[test]
+    fn cltq_sign_extends_eax() {
+        let mut session = session(".text\n.global _start\n_start:\n mov $-1,%eax\n cltq\n");
+        session.execute(Command::Step);
+        assert_eq!(register(&session.view(), "rax"), "0x00000000ffffffff");
+        session.execute(Command::Step);
+        assert_eq!(register(&session.view(), "rax"), "0xffffffffffffffff");
+    }
+
+    #[test]
+    fn jump_aliases_keep_their_written_spelling() {
+        let mut session = session(
+            ".text\n.global _start\n_start:\n xor %rax,%rax\n jz zero\n mov $1,%rdi\nzero:\n sub $1,%rax\n js negative\n mov $2,%rdi\nnegative:\n mov $60,%rax\n syscall\n",
+        );
+        session.execute(Command::Step);
+        let zero = session.execute(Command::Step);
+        assert!(zero.events.iter().any(|event| matches!(
+            event,
+            StepEvent::Branch { condition, taken: true, .. } if condition == "jz"
+        )));
+        assert!(zero.explanation.contains("another spelling of je"));
+        session.execute(Command::Step);
+        let negative = session.execute(Command::Step);
+        assert!(negative.events.iter().any(|event| matches!(
+            event,
+            StepEvent::Branch { condition, taken: true, .. } if condition == "js"
+        )));
+        let exit = session.execute(Command::Continue { max_steps: 10 });
+        assert!(matches!(
+            exit.view.status,
+            MachineStatus::Exited {
+                shell_status: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn jumping_to_data_is_diagnosed_before_running() {
+        let Err(error) = Session::from_modules(vec![SourceModule::new(
+            "bad.s",
+            ".data\narr: .quad 1\n.text\n.global _start\n_start:\n jmp arr\n",
+        )]) else {
+            panic!("jumping to data should not assemble");
+        };
+        assert!(
+            error
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("is data, not code"))
         );
     }
 

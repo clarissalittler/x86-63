@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Diagnostic, Flags, MachineStatus, SourceLocation, SymbolView};
 
-// Version 5 adds source breakpoints and makes debugger stops part of the same
-// command/event protocol used by the browser, REPL, and TUI.
-pub const PROTOCOL_VERSION: u32 = 5;
+// Version 6 marks signed division events so idivq can be explained alongside
+// divq, and adds the reversible `set $reg = value` command. Version 5 added
+// source breakpoints to the shared command protocol.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
@@ -12,10 +13,23 @@ pub enum Command {
     Step,
     Next,
     Back,
-    Continue { max_steps: usize },
-    SubmitInput { text: String },
-    ToggleBreakpoint { module: String, line: usize },
+    Continue {
+        max_steps: usize,
+    },
+    SubmitInput {
+        text: String,
+    },
+    ToggleBreakpoint {
+        module: String,
+        line: usize,
+    },
     ClearBreakpoints,
+    /// `set $reg = EXPR`; the value is an expression string so 64-bit values
+    /// survive JSON transport to the browser.
+    SetRegister {
+        register: String,
+        value: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +190,7 @@ pub enum StepEvent {
         quotient: String,
         remainder: String,
         width: u8,
+        signed: bool,
     },
     FlagsChanged {
         before: FlagsView,

@@ -1,16 +1,33 @@
+use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 
-use x86_63_core::{Command, MachineView, ProgramView, ReplInput, Session, parse_repl_input};
+use x86_63_core::{ReplInput, Session, parse_repl_input, run_repl_line};
 
 use crate::display;
 
-pub fn run(mut session: Session) -> Result<(), String> {
-    println!("x86-63 CS201 REPL");
-    println!(
-        "Type `step`/`si`, `next`, `back`, `run`, `break LINE`, `input TEXT`, `regs`, `memory`, `stack`, `output`, `why`, `reset`, `help`, or `quit`."
-    );
+/// Nested `source` files deeper than this are refused, which also stops a
+/// script from sourcing itself forever.
+const MAX_SOURCE_DEPTH: usize = 8;
+
+pub fn run(mut session: Session, scripts: &[impl AsRef<Path>], batch: bool) -> Result<(), String> {
     let modules = session.program().modules;
-    display::print_source_context(&session.view(), &modules);
+    if !batch {
+        println!("x86-63 CS201 REPL");
+        println!(
+            "Type `si`, `ni`, `back`, `c`, `break LINE`, `input TEXT`, `p/x $rax`, `x/8xb &buff`, `bt`, `why`, `help`, or `quit`."
+        );
+        display::print_source_context(&session.view(), &modules);
+    }
+
+    for script in scripts {
+        if run_script(&mut session, script.as_ref(), 0)? {
+            return Ok(());
+        }
+    }
+    if batch {
+        return Ok(());
+    }
 
     let stdin = io::stdin();
     loop {
@@ -25,122 +42,64 @@ pub fn run(mut session: Session) -> Result<(), String> {
             println!();
             return Ok(());
         }
-        match parse_repl_input(&line) {
-            ReplInput::Command(command) => {
-                let result = session.execute(command);
-                display::print_result(&result);
-                display::print_source_context(&result.view, &modules);
-            }
-            ReplInput::Registers => display::print_registers(&session.view()),
-            ReplInput::Memory => display::print_memory(&session.view()),
-            ReplInput::Stack => display::print_stack(&session.view()),
-            ReplInput::Output => display::print_output(&session.view()),
-            ReplInput::Breakpoint(specification) => {
-                match breakpoint_command(&specification, &session.view(), &session.program()) {
-                    Ok(command) => {
-                        let result = session.execute(command);
-                        display::print_result(&result);
-                        display::print_source_context(&result.view, &modules);
-                    }
-                    Err(message) => println!("{message}"),
-                }
-            }
-            ReplInput::Breakpoints => print_breakpoints(&session.view()),
-            ReplInput::ClearBreakpoints => {
-                let result = session.execute(Command::ClearBreakpoints);
-                display::print_result(&result);
-            }
-            ReplInput::Input(text) => {
-                let result = session.execute(Command::SubmitInput { text });
-                display::print_result(&result);
-                display::print_source_context(&result.view, &modules);
-            }
-            ReplInput::Why => println!("{}", session.last_explanation()),
-            ReplInput::Help => println!(
-                "step|si: one instruction; next|ni: step over; back: undo; run|c: continue;\n\
-                 input TEXT: submit a terminal line; regs: registers/flags; memory: data;\n\
-                 stack: active stack slots; output: stdin/stdout/stderr; why: explanation;\n\
-                 break LINE|MODULE:LINE|LABEL: toggle source breakpoint; info breakpoints: list;\n\
-                 clear breakpoints: remove all breakpoints;\n\
-                 reset: restart; quit: leave"
-            ),
-            ReplInput::Quit => return Ok(()),
-            ReplInput::Empty => {}
-            ReplInput::Unknown(command) => {
-                println!("unknown command `{command}`; type `help`");
-            }
+        if run_line(&mut session, &line, 0)? {
+            return Ok(());
         }
     }
 }
 
-fn breakpoint_command(
-    specification: &str,
-    view: &MachineView,
-    program: &ProgramView,
-) -> Result<Command, String> {
-    let specification = specification.trim();
-    if specification.is_empty() {
-        return Err("usage: break LINE, break MODULE:LINE, or break LABEL".to_string());
+/// Runs one line, returning true when it asked to quit.
+fn run_line(session: &mut Session, line: &str, depth: usize) -> Result<bool, String> {
+    let modules = session.program().modules;
+    match parse_repl_input(line) {
+        ReplInput::Registers => display::print_registers(&session.view()),
+        ReplInput::Memory => display::print_memory(&session.view()),
+        ReplInput::Stack => display::print_stack(&session.view()),
+        ReplInput::Output => display::print_output(&session.view()),
+        ReplInput::Source(path) if !path.is_empty() => {
+            return run_script(session, Path::new(&path), depth + 1);
+        }
+        _ => {
+            let response = run_repl_line(session, line);
+            if response.quit {
+                return Ok(true);
+            }
+            match &response.result {
+                Some(result) => {
+                    display::print_result(result);
+                    display::print_source_context(&result.view, &modules);
+                }
+                None if !response.output.is_empty() => println!("{}", response.output),
+                None => {}
+            }
+        }
     }
-
-    if let Some(index) = program.labels.get(specification)
-        && let Some(instruction) = program.instructions.get(*index)
-    {
-        return Ok(Command::ToggleBreakpoint {
-            module: instruction.location.module.clone(),
-            line: instruction.location.line,
-        });
-    }
-
-    let (module, line_text) = if let Some((module, line)) = specification.rsplit_once(':') {
-        (module.to_string(), line)
-    } else {
-        let module = view
-            .next_instruction
-            .as_ref()
-            .map(|location| location.module.clone())
-            .or_else(|| program.modules.first().map(|module| module.name.clone()))
-            .ok_or_else(|| "the program has no source module".to_string())?;
-        (module, specification)
-    };
-    let line = line_text
-        .parse::<usize>()
-        .map_err(|_| format!("`{line_text}` is not a source line number"))?;
-    Ok(Command::ToggleBreakpoint { module, line })
+    Ok(false)
 }
 
-fn print_breakpoints(view: &MachineView) {
-    if view.breakpoints.is_empty() {
-        println!("no breakpoints set");
-        return;
+/// Replays a command file, echoing each line after the prompt as GDB does with
+/// `-x`. Blank lines and `#` comments are skipped. Returns true on `quit`.
+fn run_script(session: &mut Session, path: &Path, depth: usize) -> Result<bool, String> {
+    if depth > MAX_SOURCE_DEPTH {
+        return Err(format!(
+            "{}: `source` is nested more than {MAX_SOURCE_DEPTH} levels deep",
+            path.display()
+        ));
     }
-    println!("breakpoints:");
-    for location in &view.breakpoints {
-        println!("  {}:{}", location.module, location.line);
+    let script = fs::read_to_string(path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    for line in script_lines(&script) {
+        println!("(x86-63) {line}");
+        if run_line(session, line, depth)? {
+            return Ok(true);
+        }
     }
+    Ok(false)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use x86_63_core::SourceModule;
-
-    #[test]
-    fn resolves_lines_modules_and_labels() {
-        let session = Session::from_modules(vec![SourceModule::new(
-            "main.s",
-            ".text\n.global _start\n_start:\n mov $60,%rax\n syscall\n",
-        )])
-        .unwrap();
-        let view = session.view();
-        let program = session.program();
-        assert!(matches!(
-            breakpoint_command("4", &view, &program),
-            Ok(Command::ToggleBreakpoint { module, line }) if module == "main.s" && line == 4
-        ));
-        assert!(matches!(
-            breakpoint_command("_start", &view, &program),
-            Ok(Command::ToggleBreakpoint { module, line }) if module == "main.s" && line == 4
-        ));
-    }
+pub fn script_lines(script: &str) -> impl Iterator<Item = &str> {
+    script
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
 }

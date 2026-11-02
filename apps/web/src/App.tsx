@@ -8,6 +8,7 @@ import type {
   MachineStatus,
   MachineView,
   ProgramView,
+  ReplResponse,
   StepEvent
 } from "./types";
 
@@ -19,7 +20,10 @@ type Command =
   | "ClearBreakpoints"
   | { Continue: { max_steps: number } }
   | { SubmitInput: { text: string } }
-  | { ToggleBreakpoint: { module: string; line: number } };
+  | { ToggleBreakpoint: { module: string; line: number } }
+  | { SetRegister: { register: string; value: string } };
+
+type ConsoleEntry = { sequence: number; line: string; output: string };
 
 type TutorialStep = {
   title: string;
@@ -33,7 +37,11 @@ type EditableModule = { name: string; source: string };
 type TeachingMode = "learn" | "inspect";
 type NumberFormat = "signed" | "unsigned" | "binary" | "ascii";
 type MemoryFormat = "auto" | "byte" | "word" | "long" | "quad" | "text";
-type TraceEntry = { sequence: number; command: Command; result: CommandResult };
+type TraceEntry = {
+  sequence: number;
+  command: Command | { Console: string };
+  result: CommandResult;
+};
 type WorkspacePayload = {
   format: "x86-63-workspace";
   version: number;
@@ -92,6 +100,7 @@ export default function App() {
   const [sourceDirty, setSourceDirty] = useState(false);
   const [assignmentFeedback, setAssignmentFeedback] = useState<string | null>(null);
   const [workspaceFeedback, setWorkspaceFeedback] = useState<string | null>(null);
+  const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -135,6 +144,7 @@ export default function App() {
       setActivePrediction(null);
       setChallengeFeedback(null);
       setAssignmentFeedback(null);
+      setConsoleEntries([]);
       if (nextView.next_instruction) setActiveModuleName(nextView.next_instruction.module);
     } catch (error: unknown) {
       session.current = null;
@@ -148,6 +158,41 @@ export default function App() {
       setChallengeFeedback(null);
       setAssignmentFeedback(null);
     }
+  };
+
+  const applyResult = (command: TraceEntry["command"], next: CommandResult) => {
+    setResult(next);
+    setView(next.view);
+    if (next.view.next_instruction) setActiveModuleName(next.view.next_instruction.module);
+    setDiagnostics(next.diagnostics);
+    setTutorialFeedback(null);
+    setChallengeFeedback(null);
+    setAssignmentFeedback(null);
+    setTraceEntries((current) => [
+      ...current,
+      { sequence: current.length + 1, command, result: next }
+    ]);
+  };
+
+  // Console lines run through the same core REPL as `x86-63 repl`, so a
+  // command script behaves identically in the browser and the terminal.
+  const runConsoleLines = (lines: string[]) => {
+    if (!session.current) return;
+    const answered: { line: string; output: string }[] = [];
+    try {
+      for (const line of lines) {
+        const response = JSON.parse(session.current.repl(line)) as ReplResponse;
+        answered.push({ line, output: response.output });
+        if (response.result) applyResult({ Console: line }, response.result);
+        if (response.quit) break;
+      }
+    } catch (error: unknown) {
+      setBootError(String(error));
+    }
+    setConsoleEntries((current) => [
+      ...current,
+      ...answered.map((entry, index) => ({ sequence: current.length + index + 1, ...entry }))
+    ]);
   };
 
   const execute = (command: Command) => {
@@ -886,6 +931,14 @@ export default function App() {
             />
           )}
 
+          {view && (
+            <DebuggerConsole
+              entries={consoleEntries}
+              onRun={runConsoleLines}
+              onClear={() => setConsoleEntries([])}
+            />
+          )}
+
           {diagnostics.length > 0 && <Diagnostics diagnostics={diagnostics} />}
         </div>
       </section>
@@ -1206,7 +1259,7 @@ function eventText(event: StepEvent): string {
     case "arithmetic":
       return `${event.operation}: ${event.left} and ${event.right} produced ${event.result}`;
     case "division":
-      return `div: ${event.dividend_high}:${event.dividend_low} ÷ ${event.divisor} → quotient ${event.quotient}, remainder ${event.remainder}`;
+      return `${event.signed ? "idiv" : "div"}: ${event.dividend_high}:${event.dividend_low} ÷ ${event.divisor} → quotient ${event.quotient}, remainder ${event.remainder}`;
     case "effective_address":
       return `${event.expression} resolves to ${event.address}${event.symbol ? ` (${event.symbol})` : ""}`;
     case "memory_read":
@@ -1392,6 +1445,109 @@ function StackPanel({
           ))}
         </div>
       )}
+    </section>
+  );
+}
+
+function scriptLines(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+}
+
+function DebuggerConsole({
+  entries,
+  onRun,
+  onClear
+}: {
+  entries: ConsoleEntry[];
+  onRun: (lines: string[]) => void;
+  onClear: () => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  const scriptInput = useRef<HTMLInputElement | null>(null);
+  const log = useRef<HTMLDivElement | null>(null);
+  const history = entries.map((entry) => entry.line);
+
+  useEffect(() => {
+    log.current?.scrollTo({ top: log.current.scrollHeight });
+  }, [entries.length]);
+
+  const recall = (direction: -1 | 1) => {
+    if (history.length === 0) return;
+    const start = historyIndex ?? history.length;
+    const next = Math.min(Math.max(start + direction, 0), history.length);
+    setHistoryIndex(next === history.length ? null : next);
+    setDraft(next === history.length ? "" : (history[next] ?? ""));
+  };
+
+  return (
+    <section className="panel console-panel" aria-label="Debugger console">
+      <div className="panel-heading">
+        <h2>Debugger console</h2>
+        <span className="memory-size">same commands as x86-63 repl · type help</span>
+      </div>
+      {entries.length > 0 && (
+        <div className="console-log" ref={log} role="log" aria-live="polite">
+          {entries.map((entry) => (
+            <div className="console-entry" key={entry.sequence}>
+              <code className="console-command">(x86-63) {entry.line}</code>
+              {entry.output && <pre>{entry.output}</pre>}
+            </div>
+          ))}
+        </div>
+      )}
+      <form
+        className="console-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!draft.trim()) return;
+          onRun([draft]);
+          setDraft("");
+          setHistoryIndex(null);
+        }}
+      >
+        <label htmlFor="console-line">(x86-63)</label>
+        <input
+          id="console-line"
+          value={draft}
+          spellCheck={false}
+          autoComplete="off"
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowUp") {
+              event.preventDefault();
+              recall(-1);
+            } else if (event.key === "ArrowDown") {
+              event.preventDefault();
+              recall(1);
+            }
+          }}
+          placeholder="p/x $rax · x/8xb &buff · break 12 · bt"
+        />
+        <button type="submit">Run</button>
+      </form>
+      <div className="console-actions">
+        <button type="button" onClick={() => scriptInput.current?.click()}>
+          Run script…
+        </button>
+        <button type="button" onClick={onClear} disabled={entries.length === 0}>
+          Clear log
+        </button>
+        <input
+          ref={scriptInput}
+          type="file"
+          accept=".gdb,.txt,text/plain"
+          hidden
+          onChange={async (event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (file) onRun(scriptLines(await file.text()));
+          }}
+        />
+      </div>
     </section>
   );
 }
@@ -1616,6 +1772,10 @@ function lessonGroups(lessons: Lesson[]) {
   if (assignments.length > 0) {
     groups.push({ key: "assignments", label: "Assignment 2", lessons: assignments });
   }
+  const guide = lessons.filter((lesson) => lesson.collection === "guide");
+  if (guide.length > 0) {
+    groups.push({ key: "guide", label: "Assembly guide", lessons: guide });
+  }
   const practice = lessons.filter((lesson) => lesson.collection === "practice");
   if (practice.length > 0) {
     groups.push({ key: "practice", label: "Practice labs", lessons: practice });
@@ -1626,6 +1786,7 @@ function lessonGroups(lessons: Lesson[]) {
 function lessonCollectionLabel(lesson: Lesson): string {
   if (lesson.collection === "assignment") return "Assignment 2";
   if (lesson.collection === "practice") return "Practice lab";
+  if (lesson.collection === "guide") return "Assembly guide";
   return `Lecture ${lesson.lecture}`;
 }
 

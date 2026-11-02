@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use x86_63_core::{
     Command, CommandResult, MachineStatus, MachineView, ProgramView, Session, StepEvent,
+    run_repl_line,
 };
 
 pub fn run(session: Session) -> io::Result<()> {
@@ -56,7 +57,30 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> 
                 match key.code {
                     KeyCode::Esc => {
                         app.input_mode = false;
+                        app.command_mode = false;
                         app.input_buffer.clear();
+                    }
+                    KeyCode::Enter if app.command_mode => {
+                        let line = std::mem::take(&mut app.input_buffer);
+                        app.input_mode = false;
+                        app.command_mode = false;
+                        let response = run_repl_line(&mut app.session, &line);
+                        if response.quit {
+                            return Ok(());
+                        }
+                        app.command_output = match response.result {
+                            Some(result) => {
+                                if matches!(
+                                    result.view.status,
+                                    MachineStatus::WaitingForInput { .. }
+                                ) {
+                                    app.input_mode = true;
+                                }
+                                app.last = Some(result);
+                                None
+                            }
+                            None => Some(format!("(x86-63) {line}\n{}", response.output)),
+                        };
                     }
                     KeyCode::Enter => {
                         let result = app.session.execute(Command::SubmitInput {
@@ -73,8 +97,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> 
                 }
                 continue;
             }
+            app.command_output = None;
             let command = match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                KeyCode::Char(':') => {
+                    app.input_mode = true;
+                    app.command_mode = true;
+                    None
+                }
                 KeyCode::Char('m') => {
                     app.detail = app.detail.toggle();
                     None
@@ -137,7 +167,11 @@ struct App {
     last: Option<CommandResult>,
     detail: DetailPane,
     input_mode: bool,
+    /// The input line is a REPL command (`:`) rather than a stdin line.
+    command_mode: bool,
     input_buffer: String,
+    /// Text answer from the last `:` command, shown in place of the explanation.
+    command_output: Option<String>,
 }
 
 impl App {
@@ -149,7 +183,9 @@ impl App {
             last: None,
             detail: DetailPane::Registers,
             input_mode: false,
+            command_mode: false,
             input_buffer: String::new(),
+            command_output: None,
         }
     }
 
@@ -219,13 +255,19 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
         .split(outer[0]);
     draw_source(frame, columns[0], app);
     draw_machine(frame, columns[1], app);
-    let help_text = if app.input_mode {
+    let help_text = if app.command_mode {
+        format!(
+            " (x86-63) {}  Enter run command  Esc cancel ",
+            app.input_buffer
+        )
+    } else if app.input_mode {
         format!(
             " stdin> {}  Enter submit line  Esc cancel ",
             app.input_buffer
         )
     } else {
-        " s step n next b back c run x break X clear i input r reset m pane q quit ".to_string()
+        " s step n next b back c run x break X clear i input : command r reset m pane q quit "
+            .to_string()
     };
     let help = Paragraph::new(help_text)
         .style(Style::default().fg(Color::Black).bg(Color::Cyan))
@@ -332,6 +374,15 @@ fn draw_machine(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         rows[1],
     );
 
+    if let Some(output) = &app.command_output {
+        frame.render_widget(
+            Paragraph::new(output.replace('\t', "  "))
+                .block(Block::default().borders(Borders::ALL).title(" Command "))
+                .wrap(Wrap { trim: false }),
+            rows[2],
+        );
+        return;
+    }
     let mut explanation = app.explanation().to_string();
     if let Some(result) = &app.last
         && !result.diagnostics.is_empty()

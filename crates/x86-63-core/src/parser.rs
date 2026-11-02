@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::diagnostic::Diagnostic;
+use crate::expression;
 use crate::machine::{JumpCondition, MemoryAddress, Operand, Operation, RegisterRef};
 use crate::program::{DATA_BASE, Instruction, Program, SourceLocation, SourceModule};
 
@@ -36,6 +37,16 @@ struct RawInstruction {
     location: SourceLocation,
 }
 
+/// A GNU numeric local label such as `1:`, referenced as `1b` (the nearest
+/// definition at or above the reference) or `1f` (the nearest one below).
+#[derive(Clone, Debug)]
+struct LocalLabel {
+    module: String,
+    name: String,
+    line: usize,
+    instruction_index: usize,
+}
+
 pub fn compile(modules: Vec<SourceModule>) -> Result<Program, Vec<Diagnostic>> {
     if modules.is_empty() {
         return Err(vec![Diagnostic::error(
@@ -47,6 +58,7 @@ pub fn compile(modules: Vec<SourceModule>) -> Result<Program, Vec<Diagnostic>> {
 
     let mut raw_instructions = Vec::new();
     let mut labels = BTreeMap::new();
+    let mut local_labels = Vec::new();
     let mut data_symbols = BTreeMap::new();
     let mut data_symbol_widths = BTreeMap::new();
     let mut data_symbol_sections = BTreeMap::new();
@@ -70,7 +82,34 @@ pub fn compile(modules: Vec<SourceModule>) -> Result<Program, Vec<Diagnostic>> {
                 continue;
             }
 
-            while let Some((label, rest)) = take_label(code) {
+            loop {
+                if let Some((name, rest)) = take_local_label(code) {
+                    if section == Some(Section::Text) {
+                        local_labels.push(LocalLabel {
+                            module: module.name.clone(),
+                            name: name.to_string(),
+                            line: location.line,
+                            instruction_index: raw_instructions.len(),
+                        });
+                    } else {
+                        diagnostics.push(
+                            Diagnostic::error(
+                                "E104",
+                                format!("numeric local label `{name}:` is only supported in .text"),
+                                Some(location.clone()),
+                            )
+                            .with_help("give data a named label such as `values:`"),
+                        );
+                    }
+                    code = rest.trim();
+                    if code.is_empty() {
+                        break;
+                    }
+                    continue;
+                }
+                let Some((label, rest)) = take_label(code) else {
+                    break;
+                };
                 define_label(
                     label,
                     section,
@@ -153,6 +192,7 @@ pub fn compile(modules: Vec<SourceModule>) -> Result<Program, Vec<Diagnostic>> {
             &raw.text,
             raw.location.clone(),
             &labels,
+            &local_labels,
             &data_symbols,
             &constants,
         ) {
@@ -295,7 +335,7 @@ fn define_equate(
         }
         Err(message) => diagnostics.push(
             Diagnostic::error("E140", message, Some(location.clone()))
-                .with_help("the current slice supports integers, symbols, and `. - symbol`"),
+                .with_help("equates support integers, symbols, `.`, parentheses, and + - * / %"),
         ),
     }
 }
@@ -312,20 +352,73 @@ fn parse_equate_expression(
     data_symbols: &BTreeMap<String, u64>,
     constants: &BTreeMap<String, u64>,
 ) -> Result<u64, String> {
-    if let Some((left, right)) = expression.split_once('-') {
-        let left = left.trim();
-        let right = right.trim();
-        let left_value = if left == "." {
-            current.ok_or_else(|| "`.` is only available while laying out .data".to_string())?
-        } else {
-            resolve_value(left, data_symbols, constants)?
-        };
-        let right_value = resolve_value(right, data_symbols, constants)?;
-        return left_value
-            .checked_sub(right_value)
-            .ok_or_else(|| format!("equate expression `{expression}` is negative"));
+    evaluate_expression(expression, current, data_symbols, constants)
+}
+
+/// Evaluates the GNU-style integer expressions the course uses in equates and
+/// immediates. The result keeps the same 64-bit two's-complement range as a
+/// literal immediate.
+fn evaluate_expression(
+    expression: &str,
+    current: Option<u64>,
+    data_symbols: &BTreeMap<String, u64>,
+    constants: &BTreeMap<String, u64>,
+) -> Result<u64, String> {
+    let text = expression.trim();
+    if let Ok(value) = resolve_value(text, data_symbols, constants) {
+        return Ok(value);
     }
-    resolve_value(expression.trim(), data_symbols, constants)
+    let value = expression::evaluate(text, |token| {
+        if token == "." {
+            return current
+                .map(i128::from)
+                .ok_or_else(|| "`.` is only available while laying out .data".to_string());
+        }
+        let value = resolve_value(token, data_symbols, constants)?;
+        // Literals keep their written sign; symbols are addresses, and a
+        // stored two's-complement constant reads back as signed.
+        Ok(if constants.contains_key(token) {
+            i128::from(value as i64)
+        } else {
+            i128::from(value)
+        })
+    })?;
+    expression::to_u64(value, text)
+}
+
+fn take_local_label(code: &str) -> Option<(&str, &str)> {
+    let colon = code.find(':')?;
+    let candidate = code[..colon].trim();
+    (!candidate.is_empty()
+        && candidate
+            .chars()
+            .all(|character| character.is_ascii_digit()))
+    .then_some((candidate, &code[colon + 1..]))
+}
+
+fn resolve_local_label(
+    reference: &str,
+    location: &SourceLocation,
+    local_labels: &[LocalLabel],
+) -> Option<Result<usize, String>> {
+    let (name, direction) = reference.split_at(reference.len().checked_sub(1)?);
+    if name.is_empty() || !name.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    let mut candidates = local_labels
+        .iter()
+        .filter(|label| label.module == location.module && label.name == name);
+    let found = match direction {
+        "b" => candidates.rfind(|label| label.line <= location.line),
+        "f" => candidates.find(|label| label.line > location.line),
+        _ => return None,
+    };
+    Some(found.map(|label| label.instruction_index).ok_or_else(|| {
+        format!(
+            "no local label `{name}:` {} this line",
+            if direction == "b" { "above" } else { "below" }
+        )
+    }))
 }
 
 fn take_label(code: &str) -> Option<(&str, &str)> {
@@ -392,7 +485,7 @@ fn parse_directive(
                 diagnostics.push(
                     Diagnostic::error(
                         "E133",
-                        format!("section `{name}` is not in the Lecture 6 slice yet"),
+                        format!("section `{name}` is not in the CS201 teaching subset"),
                         Some(location.clone()),
                     )
                     .with_help("currently supported sections are .text, .data, .bss, and .rodata"),
@@ -467,7 +560,7 @@ fn parse_directive(
         _ => diagnostics.push(
             Diagnostic::error(
                 "E132",
-                format!("directive `{directive}` is not in the Lecture 6 slice yet"),
+                format!("directive `{directive}` is not in the CS201 teaching subset"),
                 Some(location.clone()),
             )
             .with_help(
@@ -565,6 +658,7 @@ fn parse_instruction(
     code: &str,
     location: SourceLocation,
     labels: &BTreeMap<String, usize>,
+    local_labels: &[LocalLabel],
     data_symbols: &BTreeMap<String, u64>,
     constants: &BTreeMap<String, u64>,
 ) -> Result<Operation, Diagnostic> {
@@ -672,18 +766,63 @@ fn parse_instruction(
         });
     }
 
-    if mnemonic == "divq" {
+    if matches!(mnemonic.as_str(), "cqo" | "cqto" | "cltq" | "cdqe") {
+        if !operands.is_empty() {
+            return Err(Diagnostic::error(
+                "E224",
+                format!("`{mnemonic}` does not take an explicit operand"),
+                Some(location),
+            )
+            .with_help("it always reads %rax/%eax and writes %rdx or %rax"));
+        }
+        let width = if matches!(mnemonic.as_str(), "cqo" | "cqto") {
+            128
+        } else {
+            64
+        };
+        return Ok(Operation::SignExtendAccumulator { width });
+    }
+
+    if matches!(mnemonic.as_str(), "div" | "divq" | "idiv" | "idivq") {
+        let signed = mnemonic.starts_with('i');
         let operand_text = one_operand(operands, &mnemonic, &location)?;
         let source = parse_operand(operand_text, data_symbols, constants, &location, false)?;
         if matches!(source, Operand::Immediate(_)) {
             return Err(Diagnostic::error(
                 "E215",
-                "divq divisor must be a register or memory operand",
+                format!("{mnemonic} divisor must be a register or memory operand"),
                 Some(location),
-            ));
+            )
+            .with_help("move the divisor into a register such as %rbx first"));
+        }
+        let width = if mnemonic.ends_with('q') {
+            64
+        } else {
+            operand_register(&source)
+                .map(RegisterRef::width)
+                .ok_or_else(|| {
+                    Diagnostic::error(
+                        "E206",
+                        format!("cannot infer the width of `{mnemonic}` from a memory operand"),
+                        Some(location.clone()),
+                    )
+                    .with_help(format!("add a suffix, such as `{mnemonic}q`"))
+                })?
+        };
+        if width != 64 {
+            return Err(Diagnostic::error(
+                "E202",
+                format!("only the 64-bit form of `{mnemonic}` is in the teaching subset"),
+                Some(location),
+            )
+            .with_help("use a 64-bit divisor register, which divides %rdx:%rax"));
         }
         validate_operand_width(&source, 64, &mnemonic, &location)?;
-        return Ok(Operation::Div { source, width: 64 });
+        return Ok(Operation::Div {
+            source,
+            width: 64,
+            signed,
+        });
     }
 
     if let Some((family, explicit_width)) = parse_unary_family(&mnemonic) {
@@ -722,7 +861,30 @@ fn parse_instruction(
                 Some(location),
             ));
         }
+        if let Some(resolved) = resolve_local_label(operands, &location, local_labels) {
+            let target = resolved.map_err(|message| {
+                Diagnostic::error("E219", message, Some(location.clone())).with_help(
+                    "`Nb` jumps back to the nearest `N:` above; `Nf` jumps forward to the nearest `N:` below",
+                )
+            })?;
+            return Ok(Operation::Jump {
+                condition,
+                mnemonic: mnemonic.clone(),
+                target,
+                target_label: operands.to_string(),
+            });
+        }
         let target = labels.get(operands).copied().ok_or_else(|| {
+            if data_symbols.contains_key(operands) {
+                return Diagnostic::error(
+                    "E219",
+                    format!("jump target `{operands}` is data, not code"),
+                    Some(location.clone()),
+                )
+                .with_help(
+                    "GNU as accepts this, but the CPU would try to execute the data bytes and crash; jump to a .text label instead",
+                );
+            }
             Diagnostic::error(
                 "E219",
                 format!("jump target `{operands}` is not a .text label"),
@@ -732,6 +894,7 @@ fn parse_instruction(
         })?;
         return Ok(Operation::Jump {
             condition,
+            mnemonic: mnemonic.clone(),
             target,
             target_label: operands.to_string(),
         });
@@ -740,11 +903,11 @@ fn parse_instruction(
     let (family, explicit_width) = parse_family(&mnemonic).ok_or_else(|| {
         Diagnostic::error(
             "E202",
-            format!("instruction `{mnemonic}` is not in the Lecture 6 slice yet"),
+            format!("instruction `{mnemonic}` is not in the CS201 teaching subset"),
             Some(location.clone()),
         )
         .with_help(
-            "supported families now include data movement, arithmetic, flags, branches, calls, stack frames, divq, and syscall",
+            "supported families include data movement, arithmetic, flags, branches, calls, stack frames, div/idiv, cqo, and syscall",
         )
     })?;
 
@@ -938,17 +1101,22 @@ fn parse_unary_family(mnemonic: &str) -> Option<(UnaryFamily, Option<u8>)> {
 fn parse_jump(mnemonic: &str) -> Option<JumpCondition> {
     Some(match mnemonic {
         "jmp" => JumpCondition::Always,
-        "je" => JumpCondition::Equal,
-        "jne" => JumpCondition::NotEqual,
-        "jl" => JumpCondition::Less,
-        "jle" => JumpCondition::LessOrEqual,
-        "jg" => JumpCondition::Greater,
-        "jge" => JumpCondition::GreaterOrEqual,
-        "jb" => JumpCondition::Below,
-        "jbe" => JumpCondition::BelowOrEqual,
-        "ja" => JumpCondition::Above,
-        "jae" => JumpCondition::AboveOrEqual,
+        "je" | "jz" => JumpCondition::Equal,
+        "jne" | "jnz" => JumpCondition::NotEqual,
+        "jl" | "jnge" => JumpCondition::Less,
+        "jle" | "jng" => JumpCondition::LessOrEqual,
+        "jg" | "jnle" => JumpCondition::Greater,
+        "jge" | "jnl" => JumpCondition::GreaterOrEqual,
+        "jb" | "jc" | "jnae" => JumpCondition::Below,
+        "jbe" | "jna" => JumpCondition::BelowOrEqual,
+        "ja" | "jnbe" => JumpCondition::Above,
+        "jae" | "jnc" | "jnb" => JumpCondition::AboveOrEqual,
+        "jo" => JumpCondition::Overflow,
         "jno" => JumpCondition::NoOverflow,
+        "js" => JumpCondition::Sign,
+        "jns" => JumpCondition::NoSign,
+        "jp" | "jpe" => JumpCondition::Parity,
+        "jnp" | "jpo" => JumpCondition::NoParity,
         _ => return None,
     })
 }
@@ -989,7 +1157,7 @@ fn parse_operand(
 ) -> Result<Operand, Diagnostic> {
     let text = text.trim();
     if let Some(immediate) = text.strip_prefix('$') {
-        return resolve_value(immediate.trim(), data_symbols, constants)
+        return evaluate_expression(immediate, None, data_symbols, constants)
             .map(Operand::Immediate)
             .map_err(|message| Diagnostic::error("E210", message, Some(location.clone())));
     }
@@ -1377,5 +1545,52 @@ mod tests {
         ))
         .unwrap_err();
         assert_eq!(diagnostics[0].code, "E217");
+    }
+
+    #[test]
+    fn resolves_numeric_local_labels_in_both_directions() {
+        let program = compile(module(
+            ".text\n.global _start\n_start:\n jmp 1f\n1:\n dec %rcx\n jnz 1b\n jmp 1f\n nop_free:\n1: mov $60,%rax\n syscall\n",
+        ))
+        .unwrap();
+        let targets: Vec<_> = program
+            .instructions
+            .iter()
+            .filter_map(|instruction| match &instruction.operation {
+                Operation::Jump { target, .. } => Some(*target),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(targets, vec![1, 1, 4]);
+
+        let diagnostics = compile(module(
+            ".text\n.global _start\n_start:\n jmp 2b\n2:\n mov $60,%rax\n syscall\n",
+        ))
+        .unwrap_err();
+        assert!(diagnostics[0].message.contains("no local label `2:` above"));
+    }
+
+    #[test]
+    fn evaluates_parenthesized_equate_and_immediate_expressions() {
+        let program = compile(module(
+            ".data\narr: .quad 7,3,11,4,9\narrlen = (. - arr) / 8\nbytes = arrlen * 8 + 0x10 - 16\nback = -16\n.text\n.global _start\n_start:\n mov $(arrlen - 1) * 2,%rcx\n mov $60,%rax\n syscall\n",
+        ))
+        .unwrap();
+        assert_eq!(program.constants["arrlen"], 5);
+        assert_eq!(program.constants["bytes"], 40);
+        assert_eq!(program.constants["back"], (-16_i64) as u64);
+        assert!(matches!(
+            &program.instructions[0].operation,
+            Operation::Mov {
+                source: Operand::Immediate(8),
+                ..
+            }
+        ));
+
+        let diagnostics = compile(module(
+            ".data\nbad = (4 + 2\n.text\n.global _start\n_start:\n syscall\n",
+        ))
+        .unwrap_err();
+        assert_eq!(diagnostics[0].code, "E140");
     }
 }
