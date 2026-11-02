@@ -222,7 +222,7 @@ bridge into the real debugger rather than a parallel command language.
 | Commands | Meaning |
 |---|---|
 | `start`, `run`, `reset` | initialize/reinitialize execution |
-| `modules`, `reload` | list modules or re-read native file-backed modules |
+| `modules`, `reload` | list modules, or re-read native file-backed modules (`reload` planned) |
 | `si`, `step` | execute one instruction, entering calls |
 | `ni`, `next` | execute through a call as one source-level action |
 | `back`, `reverse-stepi` | undo one deterministic transition |
@@ -237,7 +237,7 @@ bridge into the real debugger rather than a parallel command language.
 | `bt`, `info frame` | saved-`%rbp` frame chain and the innermost frame |
 | `source FILE`, `repl -x FILE` | replay a command script |
 | `why` | focus the explanation for the current/previous transition |
-| `asm <instruction>` | execute one instruction in scratch mode |
+| `asm <instruction>` | execute one instruction in scratch mode (planned) |
 | `help [topic]` | command and course-subset help |
 
 Browser controls, TUI keys, and textual REPL commands all lower to the same
@@ -444,81 +444,126 @@ encoding or absolute addresses.
 
 ## Delivery as course-shaped vertical slices
 
-### Slice 0: executable semantics charter
+Status as of November 2026: Slices 0–4 have shipped, and Slice 5's shared
+debugger command language is done. The remaining work is regrouped below as
+Slices 5–7, ordered by what helps a live CS201 term most.
 
-- Set up the Rust workspace, core types, versioned command/event schema, and
-  compiling native/WASM adapter shells.
-- Implement exact register aliases, widths, flags, and sparse memory.
-- Encode the acceptance fixtures and expected outcomes before the UI grows.
-- Deliverable: headless tests for machine primitives plus a native/WASM parity
-  smoke test for a no-op session command.
+### Slice 0: executable semantics charter — done
 
-### Slice 1: Lecture 3 — first arithmetic
+- Rust workspace, core types, versioned command/event schema, and
+  native/WASM adapter shells.
+- Exact register aliases, widths, flags, and sparse memory.
+- Headless tests for machine primitives plus a native/WASM parity smoke test.
 
-- Parse `.text`, `.global`, labels, immediates, registers, `mov`, `add`, `sub`,
-  `syscall 60`.
-- Minimal browser and terminal shells with source, register diff, explanation,
-  reset, step, and back. The native binary also exposes the plain REPL.
-- Run `first.s`, `firstfixed.s`, `firstadd.s`, `firstsub.s`.
-- This is the smallest useful prototype and the first cross-surface parity
-  gate: the same command script must yield the same trace in native and WASM.
+### Slice 1: Lecture 3 — first arithmetic — done
 
-### Slice 2: Lecture 4 — memory and control flow
+- `.text`, `.global`, labels, immediates, registers, `mov`, `add`, `sub`,
+  `syscall 60`, in browser, TUI, and plain REPL.
+- `first.s`, `firstfixed.s`, `firstadd.s`, `firstsub.s`.
 
-- Data/rodata/BSS directives, equates, full addressing, widths, `lea`.
-- Arithmetic flags, comparisons, conditional/unconditional branches.
-- Memory, flags, and effective-address views in both browser and TUI.
-- `write` syscall and output byte view.
-- Run every hand-written lecture 4 file.
+### Slice 2: Lecture 4 — memory and control flow — done
 
-### Slice 3: Lecture 5 — I/O and the stack
+- Data/rodata/BSS directives, equates, full addressing, widths, `lea`,
+  flags, comparisons, branches, `write`, and memory/flags/EA views.
+- Every hand-written Lecture 4 file; `scripts/differential-lecture4.sh`.
 
-- Blocking `read`, terminal input, exact byte counts.
-- `call`, `ret`, push/pop/leave, breakpoints, step-over.
-- Stack-frame visualization and alignment checks in both interfaces, with
-  equivalent text in plain REPL/trace output.
-- Run every hand-written lecture 5 file.
+### Slice 3: Lecture 5 — I/O and the stack — done
 
-### Slice 4: Lecture 6 and the assignment
+- Blocking line-at-a-time `read`, `call`/`ret`/push/pop/leave, breakpoints,
+  step-over, and stack-frame visualization with alignment checks.
+- Every hand-written Lecture 5 file; `scripts/differential-lecture5.sh`.
 
-- Multiple modules, global/extern resolution, helper module chooser.
-- Remaining helper instructions: zero extension, multiply/divide, negate,
-  signed/unsigned branches.
-- Recursive frame UX and callee-saved checks across browser, TUI, and plain
-  REPL.
-- Run `readInt`, `writeInt`, `fact`, `sumLoopArray`, and assignment `sum5`.
+### Slice 4: Lecture 6, the assignment, and the assembly guide — done
 
-### Slice 5: cross-surface classroom polish
+- Multiple modules, global/extern resolution, helper modules, zero extension,
+  multiply/divide, negate, signed/unsigned branches, recursive frames.
+- `readInt`, `writeInt`, `fact`, `sumLoopArray`, and the Assignment 2 `sum5`
+  workspace with repair labs; `scripts/differential-lecture6.sh`.
+- Guide extension: jcc aliases, `idiv`/`cqo`/`cltq`, numeric local labels
+  (`1f`/`1b`), GNU-style expressions, and the nine guide programs, checked by
+  `scripts/differential-guide.sh`. `x86-63 exec` behaves like the executable.
 
-- Complete the shared GDB-compatible command set and examples/lesson picker.
-- Browser: URL-shareable source, Learn/Inspect density, keyboard and screen
-  reader pass, stable static deployment, instructor projector mode.
-- Native: responsive SSH behavior, single-pane/small-terminal mode,
-  `NO_COLOR`, shell completion, and distributable binaries.
-- Both: import/export the same module bundle, replay the same command scripts,
-  and render every structured explanation event.
-- Differential and adapter-parity gates across the complete Tier 1 corpus.
+### Slice 5: finish the shared surfaces
+
+Done:
+
+- The GDB-compatible command language (`p/FMT`, `x/NFU`, `info registers`,
+  `info frame`, `bt`, `break *ADDR`, `set $reg`, `help TOPIC`) lives in the
+  core and is reachable from the REPL, the TUI's `:` line, and the browser
+  Debugger console.
+- Command-script replay (`repl -x`, `source`, `trace --commands`, browser
+  **Run script…**) with `npm run parity:test` asserting byte-identical native
+  and WASM responses; CI runs it on every deploy.
+- Browser workspace import/export and trace export.
+
+Remaining, in order:
+
+1. **Scratch mode and reload.** `asm <instruction>` on a blank machine for
+   lecture demos, through the same parser and history (so `back` works), and
+   `reload` to re-read file-backed modules in the native REPL/TUI while keeping
+   breakpoints. These are the last two rows of the REPL table.
+2. **One module bundle on both surfaces.** The native binary should load the
+   browser's workspace export (`x86-63 tui --workspace sum5.json`) and write
+   the same format, so a student can move a session between browser and lab
+   machine without retyping file names.
+3. **Share links.** Compressed source-in-URL (fragment, not query, so nothing
+   reaches the server), with an explicit size limit that falls back to
+   workspace export. No backend.
+4. **Differential coverage for Assignment 2.** Drive the native `sum5` with
+   paced, one-line-per-read input so the comparison avoids the
+   128-byte-read-swallows-all-lines effect, and add it to CI.
+
+### Slice 6: classroom presentation and accessibility
+
+- Keyboard pass over the browser: every control reachable, visible focus,
+  documented shortcuts matching the TUI keys where they overlap.
+- Screen-reader pass: live-region announcement of the step explanation,
+  labelled register/flag/memory tables, and no information carried by color
+  alone.
+- Instructor projector mode: large type, high contrast, Learn density, and the
+  explanation pane pinned.
+- Learn/Inspect density toggle.
+- TUI: honor `NO_COLOR`, and fall back to a single-pane layout below a minimum
+  terminal size instead of drawing clipped panes.
+- Verify the TUI `:` command line and input handling in a real terminal and
+  over SSH (so far only exercised through tests).
+
+### Slice 7: distribution
+
+- Release workflow that builds `x86-63` binaries for Linux x86-64 (the lab
+  machines) and macOS/Windows, attached to tagged GitHub releases.
+- Shell completion generated from the clap definition.
+- Read-only drift checker comparing `course-content/` with a CS201 checkout,
+  run manually before each term.
 
 ## Release 1 acceptance criteria
 
-Release 1 is done when:
+Release 1 is done when every item below holds. Status is noted per item.
 
-- Every handwritten Fall 2026 lecture 3–6 assembly file except compiler output
-  either executes correctly or produces an intentional, precise fault.
-- The assignment skeleton links with the real helper source and accepts five
-  separate terminal inputs in both browser and native sessions.
-- Step, step-over, continue, breakpoint, reset, and reverse-step agree across
-  browser controls, TUI keys, and REPL commands.
-- Every transition can identify exactly which registers, flags, memory bytes,
-  stack entries, and I/O bytes changed.
-- Invalid/unsupported syntax never silently changes meaning.
-- Continue cannot freeze the browser or make the TUI unresponsive to cancel.
-- `--no-tui` exposes every execution state and diagnostic without requiring
-  cursor control, mouse input, or color.
-- Native and WASM adapters produce byte-for-byte-equivalent versioned event
-  traces for the shared parity corpus.
-- Core semantic and golden tests pass, and deterministic examples match GNU
-  `as`/`ld` for stdout and exit status on x86-64 Linux.
+- **Met.** Every handwritten Fall 2026 lecture 3–6 assembly file except
+  compiler output either executes correctly or produces an intentional,
+  precise fault.
+- **Met.** The assignment skeleton links with the real helper source and
+  accepts five separate terminal inputs in both browser and native sessions.
+- **Met.** Step, step-over, continue, breakpoint, reset, and reverse-step
+  agree across browser controls, TUI keys, and REPL commands.
+- **Met.** Every transition can identify exactly which registers, flags,
+  memory bytes, stack entries, and I/O bytes changed.
+- **Met.** Invalid/unsupported syntax never silently changes meaning.
+- **Met by step limits; recheck in Slice 6.** Continue cannot freeze the
+  browser or make the TUI unresponsive to cancel. Both stop at an instruction
+  limit; the TUI has not been exercised interactively over SSH.
+- **Met.** The non-TUI modes (`repl`, `run`, `exec`, `check`, `trace`) expose
+  every execution state and diagnostic without cursor control, mouse input,
+  or color.
+- **Met.** Native and WASM adapters produce byte-for-byte-equivalent
+  versioned responses for the shared parity corpus (`tests/scripts/`).
+- **Met.** Core semantic and golden tests pass, and deterministic examples
+  match GNU `as`/`ld` for stdout and exit status on x86-64 Linux.
+- **Open.** Students can get a native binary without building from source
+  (Slice 7).
+- **Open.** The browser passes a keyboard-only and screen-reader walkthrough
+  of a full Lecture 5 lesson (Slice 6).
 
 ## Confirmed decisions and choices that remain
 
@@ -527,21 +572,20 @@ Confirmed:
 1. The browser visualizer and native terminal REPL/TUI are both first-class
    release surfaces.
 2. They share one semantic implementation and one command/event protocol.
-3. Given that requirement, a Rust core compiled natively and to WebAssembly is
-   the recommended architecture; TypeScript remains a browser presentation
-   language rather than a second emulator.
+3. A Rust core compiled natively and to WebAssembly; TypeScript remains a
+   browser presentation language rather than a second emulator.
 4. No backend is required for release 1.
+5. Course content is a small versioned corpus copied into
+   `course-content/`, so browser and binary releases are reproducible. A
+   drift checker against the CS201 repository is still to be written.
+6. Debugger commands are parsed and answered in the core (`run_repl_line`),
+   so every surface gets the same text for the same line.
 
-Two content/distribution choices can be made during scaffolding without
-changing the machine design:
+Still open:
 
-1. **Bundled course content:** either copy a deliberately small, versioned set
-   of examples into this repository or load them from a sibling CS201 checkout.
-   A copied/versioned set makes browser and binary releases reproducible; a
-   read-only sync/check script can detect drift from the course repository.
-2. **Browser share links:** source-in-URL is convenient but assignment code can
-   be large. A compressed URL with an explicit size limit is preferable to
-   introducing a server/database.
-
-The recommended default is a small versioned lesson corpus, a read-only drift
-checker, compressed size-limited browser links, and no backend.
+1. **Share-link size limit.** Pick a limit from the largest realistic
+   workspace (Assignment 2 with helpers) and decide whether links carry only
+   edited modules or the whole bundle.
+2. **Binary signing.** Whether unsigned macOS/Windows binaries are acceptable
+   for students, or whether to ship Linux binaries only and point others at
+   the browser.

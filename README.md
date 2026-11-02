@@ -46,8 +46,11 @@ five separate input interactions against an evidence-backed rubric checklist.
 The maintained Lecture 3–6 compositions, Assignment 2, and every complete
 program in the assembly guide now run end to end, including the real
 `readInt.s`, `writeInt.s`, recursive `fact.s`, and `sum5.s`; this completes the
-Tier 1 course-writing subset. The remaining work is cross-surface classroom
-polish (Slice 5 of the design). Unsupported syntax is rejected explicitly
+Tier 1 course-writing subset. The remaining work is scratch mode, shared
+workspace bundles and share links, accessibility and projector polish, and
+distributable binaries (Slices 5–7 of
+[the design](docs/product-design.md#delivery-as-course-shaped-vertical-slices)).
+Unsupported syntax is rejected explicitly
 instead of being guessed or silently repaired.
 
 ## Try the native version
